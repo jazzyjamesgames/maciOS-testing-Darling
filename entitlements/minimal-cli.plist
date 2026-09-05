@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Reference artifact from the rejected jailbreak-based approach (see
+	AUDIT.md section 2) -- not used by the actual M1 milestone in port/,
+	which is signed automatically by Xcode instead. Kept here alongside
+	tools/macho_patch.py in case a future jailbreak on this device (or a
+	different device) revives the direct-execution path: this is the
+	entitlement set that path would have needed for a statically-linked,
+	no-libSystem CLI binary run from a jailbroken device's shell.
+	get-task-allow lets a debugger/tracer attach; it would not have been
+	required for the binary to merely execute, only to be debuggable.
+	-->
+	<key>get-task-allow</key>
+	<true/>
+</dict>
+</plist>
