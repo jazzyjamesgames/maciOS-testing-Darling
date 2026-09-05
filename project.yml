@@ -1,0 +1,64 @@
+# XcodeGen spec (https://github.com/yonaskolb/XcodeGen) -- generates
+# maciOS.xcodeproj from this file rather than hand-authoring pbxproj XML,
+# which nobody in this project has had a working Xcode to validate. CI
+# (.github/workflows/build.yml) runs `xcodegen generate` then builds this
+# for the iOS Simulator on every push, with code signing disabled, so a
+# breakage in port/ or process-host/ shows up as a real Apple-toolchain
+# compile error instead of staying an unverified guess. See AUDIT.md
+# section 4 and docs/xcode-setup.md / docs/process-host.md for what this
+# does and doesn't prove (compiles against the real SDK; does not confirm
+# on-device behavior, entitlement/extension-launch semantics, or the
+# process-host mechanism actually getting a separate PID -- simulator
+# builds don't exercise any of that).
+
+name: maciOS
+options:
+  bundleIdPrefix: dev.local.maciOS
+  deploymentTarget:
+    iOS: "15.0"
+
+configs:
+  Debug: debug
+  Release: release
+
+targets:
+  MaciOSPortApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: port/MaciOSPortApp
+      - path: port/CLICore
+    info:
+      path: port/MaciOSPortApp/Info.plist
+      properties:
+        CFBundleDisplayName: MaciOSPortApp
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIRequiredDeviceCapabilities:
+          - arm64
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.local.maciOS.PortApp
+        SWIFT_OBJC_BRIDGING_HEADER: port/MaciOSPortApp/MaciOSPortApp-Bridging-Header.h
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - target: ProcessHost
+        embed: true
+
+  ProcessHost:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: process-host
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.local.maciOS.ProcessHost
+        INFOPLIST_FILE: process-host/Info.plist
+        CODE_SIGN_ENTITLEMENTS: process-host/ProcessHost.entitlements
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"

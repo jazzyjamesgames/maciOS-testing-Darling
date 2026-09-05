@@ -198,6 +198,18 @@ no `codesign`). Concretely:
   `docs/xcode-setup.md` and `docs/process-host.md` for you to run on your
   own Mac and device.
 
+**Update:** `.github/workflows/build.yml` closes part of this gap without
+needing a Mac at all — it runs on a `macos-latest` GitHub Actions runner,
+generates the Xcode project with XcodeGen (`project.yml`) from the exact
+source in `port/` and `process-host/`, and builds it for the iOS Simulator
+with code signing disabled. That confirms the Swift/SwiftUI and
+Objective-C actually compile against the real SDK (Info.plist schema
+included) — something nothing in this repo had been checked against
+before. It does **not** confirm anything about on-device behavior,
+entitlements, or whether `process-host/`'s extension-launch trick actually
+gets a separate PID: a simulator build doesn't exercise any of that, and
+still needs your Mac + iPhone + SideStore, per the sections above.
+
 ## 5. iOS restrictions inventory (for reference)
 
 - **AMFI / code signing + library validation**: every executable page must

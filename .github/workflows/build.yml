@@ -1,0 +1,41 @@
+name: build (simulator, compile-only)
+
+# Compiles port/ and process-host/ against the real Apple SDK on a macOS
+# runner -- something no environment used to develop this repo so far has
+# been able to do. Builds for the iOS Simulator with code signing disabled
+# entirely: this validates that the source compiles and links correctly
+# (Swift/Objective-C syntax, Info.plist schema, the app-extension target
+# wiring) but proves nothing about on-device behavior, entitlements, or
+# whether process-host/'s extension-launch trick actually works -- none of
+# that is exercised by a simulator build. See AUDIT.md and
+# docs/xcode-setup.md / docs/process-host.md for what still needs a real
+# device.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Show available simulator runtimes (for diagnosing SDK/target mismatches)
+        run: xcrun simctl list runtimes
+
+      - name: Build MaciOSPortApp (embeds ProcessHost) for iOS Simulator
+        run: |
+          xcodebuild build \
+            -project maciOS.xcodeproj \
+            -scheme MaciOSPortApp \
+            -destination "generic/platform=iOS Simulator" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO

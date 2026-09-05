@@ -49,3 +49,11 @@ Run the patcher's tests with:
 ```sh
 python3 -m unittest discover -s tests
 ```
+
+[`.github/workflows/build.yml`](.github/workflows/build.yml) builds
+`port/` + `process-host/` for the iOS Simulator on a `macos-latest` runner
+(project generated from [`project.yml`](project.yml) via
+[XcodeGen](https://github.com/yonaskolb/XcodeGen), no code signing) on
+every push — confirms the source compiles against the real Apple SDK.
+It does not confirm on-device behavior; see `AUDIT.md`'s note at the end
+of section 4.
