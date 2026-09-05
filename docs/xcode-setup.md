@@ -73,6 +73,14 @@ That string comes from `clicore_run()` in `port/CLICore/clicore.c`,
 executing as native arm64 code inside a normally-launched, normally-signed
 iOS app — no VM, no emulator, no jailbreak.
 
+Below it: a scrolling log and a **Copy Log** button. If anything looks
+wrong, or the app doesn't get this far at all, tap Copy Log (or, if it
+never launches, check Xcode's own console output) and paste what you get
+back into the chat — that's the only way to actually debug this, since
+nothing in this session has any other way to see what happened on your
+device. See `docs/getting-logs.md` for the fuller picture (Xcode console,
+device console, and this in-app log, plus what each one is good for).
+
 ## If something doesn't match this doc
 
 Xcode's exact UI moves between versions; if a menu item above is named or

@@ -1,15 +1,26 @@
-name: build (simulator, compile-only)
+name: build
 
 # Compiles port/ and process-host/ against the real Apple SDK on a macOS
 # runner -- something no environment used to develop this repo so far has
-# been able to do. Builds for the iOS Simulator with code signing disabled
-# entirely: this validates that the source compiles and links correctly
-# (Swift/Objective-C syntax, Info.plist schema, the app-extension target
-# wiring) but proves nothing about on-device behavior, entitlements, or
-# whether process-host/'s extension-launch trick actually works -- none of
-# that is exercised by a simulator build. See AUDIT.md and
-# docs/xcode-setup.md / docs/process-host.md for what still needs a real
-# device.
+# been able to do. Two builds:
+#
+#   1. iOS Simulator, code signing disabled -- fast compile check (Swift/
+#      Objective-C syntax, Info.plist schema, the app-extension target
+#      wiring). This is what caught the "Embedded binary's bundle
+#      identifier is not prefixed with the parent app's bundle identifier"
+#      error on the first run.
+#   2. Real device (iphoneos SDK, arm64), code signing disabled -- produces
+#      an actual unsigned .ipa, uploaded as a workflow artifact. This is
+#      the SAME shape ios18-probe's own CI produced ("Probe-unsigned.ipa"):
+#      SideStore/AltStore resign an unsigned IPA themselves at install
+#      time (AUDIT.md section 2), so an unsigned build is the correct
+#      input, not a placeholder.
+#
+# Neither build proves anything about on-device behavior, entitlements, or
+# whether process-host/'s extension-launch trick actually works -- a
+# compile success (simulator or device) doesn't exercise any of that. See
+# AUDIT.md and docs/xcode-setup.md / docs/process-host.md for what still
+# needs a real device plus SideStore.
 
 on:
   push:
@@ -28,14 +39,41 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Show available simulator runtimes (for diagnosing SDK/target mismatches)
-        run: xcrun simctl list runtimes
-
-      - name: Build MaciOSPortApp (embeds ProcessHost) for iOS Simulator
+      - name: Build for iOS Simulator (compile check)
         run: |
           xcodebuild build \
             -project maciOS.xcodeproj \
             -scheme MaciOSPortApp \
+            -configuration Debug \
             -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath DerivedData-sim \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
+
+      - name: Build for a real device, unsigned (for SideStore to sign at install)
+        run: |
+          xcodebuild build \
+            -project maciOS.xcodeproj \
+            -scheme MaciOSPortApp \
+            -configuration Debug \
+            -sdk iphoneos \
+            -derivedDataPath DerivedData-device \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Package the unsigned .app as an .ipa
+        run: |
+          APP="DerivedData-device/Build/Products/Debug-iphoneos/MaciOSPortApp.app"
+          test -d "$APP" || { echo "::error::built .app not found at $APP"; find DerivedData-device/Build/Products -maxdepth 3; exit 1; }
+          mkdir -p ipa_root/Payload
+          cp -R "$APP" ipa_root/Payload/
+          (cd ipa_root && zip -qr ../MaciOSPortApp-unsigned.ipa Payload)
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MaciOSPortApp-unsigned-ipa
+          path: MaciOSPortApp-unsigned.ipa
+          if-no-files-found: error

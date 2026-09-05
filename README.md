@@ -51,9 +51,16 @@ python3 -m unittest discover -s tests
 ```
 
 [`.github/workflows/build.yml`](.github/workflows/build.yml) builds
-`port/` + `process-host/` for the iOS Simulator on a `macos-latest` runner
-(project generated from [`project.yml`](project.yml) via
-[XcodeGen](https://github.com/yonaskolb/XcodeGen), no code signing) on
-every push — confirms the source compiles against the real Apple SDK.
-It does not confirm on-device behavior; see `AUDIT.md`'s note at the end
-of section 4.
+`port/` + `process-host/` on a `macos-latest` runner (project generated
+from [`project.yml`](project.yml) via
+[XcodeGen](https://github.com/yonaskolb/XcodeGen)) on every push: a fast
+iOS Simulator compile check, then a real-device build producing an
+**unsigned `.ipa`** uploaded as a workflow artifact — the correct input
+for SideStore/AltStore to sign at install (they resign an unsigned IPA
+themselves; see `AUDIT.md` section 2). Neither build confirms on-device
+behavior; see `AUDIT.md`'s note at the end of section 4.
+
+**[`docs/getting-logs.md`](docs/getting-logs.md)** — every channel that
+actually exists for getting a real log back into this chat (CI, Xcode's
+console, the app's own in-app log/Copy-Log button, Console.app/sysdiagnose
+for a hard crash). Read this before running anything on-device.

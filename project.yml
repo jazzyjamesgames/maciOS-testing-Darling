@@ -56,7 +56,7 @@ targets:
       - path: process-host
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.local.maciOS.ProcessHost
+        PRODUCT_BUNDLE_IDENTIFIER: dev.local.maciOS.PortApp.ProcessHost
         INFOPLIST_FILE: process-host/Info.plist
         CODE_SIGN_ENTITLEMENTS: process-host/ProcessHost.entitlements
         CODE_SIGN_STYLE: Automatic

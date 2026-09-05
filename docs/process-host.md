@@ -77,7 +77,7 @@ This is ordinary `NSExtension` API, not anything private -- the same shape
 
 ```objc
 NSError *error = nil;
-NSExtension *ext = [NSExtension extensionWithIdentifier:@"dev.local.maciOS.ProcessHost"
+NSExtension *ext = [NSExtension extensionWithIdentifier:@"dev.local.maciOS.PortApp.ProcessHost"
                                                    error:&error];
 NSExtensionItem *item = [NSExtensionItem new];
 item.userInfo = @{@"dylibPath": dylibPath, @"entryPoint": @"mytool_main"};

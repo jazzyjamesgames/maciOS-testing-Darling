@@ -4,8 +4,16 @@
 <dict>
 	<key>CFBundleExecutable</key>
 	<string>ProcessHost</string>
+	<!--
+	Must be prefixed by the embedding host app's own bundle identifier --
+	Xcode's build system enforces this for any embedded app extension
+	("Embedded binary's bundle identifier is not prefixed with the parent
+	app's bundle identifier", caught by CI's simulator build). This value
+	assumes the host app is dev.local.maciOS.PortApp (port/); adjust both
+	if this extension is embedded in a different host app.
+	-->
 	<key>CFBundleIdentifier</key>
-	<string>dev.local.maciOS.ProcessHost</string>
+	<string>dev.local.maciOS.PortApp.ProcessHost</string>
 	<key>CFBundleName</key>
 	<string>ProcessHost</string>
 	<key>CFBundlePackageType</key>
