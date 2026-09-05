@@ -5,32 +5,44 @@ natively (ARM64, no VM, no CPU emulator), taking inspiration from
 [Darling](https://github.com/darlinghq/darling)'s approach to macOS
 compatibility on Linux.
 
-**Start here:** [`AUDIT.md`](AUDIT.md) — architecture audit, what Darling's
-approach does and doesn't carry over to iOS, and why the initial
-"patch the Mach-O and run it" idea doesn't work without a jailbreak.
-Then [`MILESTONES.md`](MILESTONES.md) for the plan this repo actually
-follows given that constraint.
+**Start here:** [`AUDIT.md`](AUDIT.md) — architecture audit: what Darling's
+approach does and doesn't carry over to iOS, and two mechanisms that make
+native execution possible on this device without jailbreak. Then
+[`MILESTONES.md`](MILESTONES.md) for the plan this repo follows.
 
 ## Current state (target device: iPhone 14, iOS 26.1, not jailbroken)
 
-Direct execution of an unmodified macOS binary is not possible on this
-device — iOS enforces code-signature trust chains and app-bundle launch
-requirements in-kernel, with no jailbreak available to bypass them. The
-viable path is a **source-level port**: recompile the target code for
-`arm64-apple-ios` (still native ARM64, nothing emulated), host it in a
-minimal signed iOS app, and run it via Xcode.
+Two walls, two non-jailbreak fixes, both documented in `AUDIT.md` with the
+prior art they're drawn from:
+
+1. **Code signing / library validation** — a byte-patched Mach-O needs a
+   real signing identity applied to the *whole* app bundle at install
+   time (SideStore/AltStore do this), not just a hash-consistent ad-hoc
+   signature. `tools/macho_patch.py` produces the patched binary; the
+   bundle + install step is where the identity gets applied.
+2. **No `posix_spawn`** — a sandboxed app can't spawn a new process, but
+   it can ask iOS's own app-extension launch machinery to create one
+   (LiveContainer's trick, adapted in `process-host/`).
+
+That opens two paths, both 100% native ARM64:
+
+- [`port/`](port/) — **M1**, path A: you have the source. Recompile for
+  `arm64-apple-ios`, host in a minimal signed app, install via Xcode.
+  See [`docs/xcode-setup.md`](docs/xcode-setup.md).
+- [`process-host/`](process-host/) — **M2**, path B: you have a compiled
+  binary, not necessarily its source. Patch it
+  (`tools/macho_patch.py patch` + `dylibify`), bundle it, run it as a real
+  separate process via this extension. See
+  [`docs/process-host.md`](docs/process-host.md).
 
 - [`AUDIT.md`](AUDIT.md) — the full technical audit.
 - [`MILESTONES.md`](MILESTONES.md) — the milestone plan.
-- [`port/`](port/) — M1: a trivial CLI, ported and ready to build.
-- [`docs/xcode-setup.md`](docs/xcode-setup.md) — the steps to build, sign,
-  and run M1 on your iPhone (requires a Mac with Xcode).
 - [`tools/macho_patch.py`](tools/macho_patch.py), [`tests/`](tests/),
-  [`fixtures/`](fixtures/), [`entitlements/`](entitlements/) — a validated
-  Mach-O platform-tag patcher built while testing the (rejected)
-  direct-execution approach. Kept as reference for why hash-consistent
-  ad-hoc patching still isn't enough without a trusted signing chain; see
-  `AUDIT.md` section 2.
+  [`fixtures/`](fixtures/), [`entitlements/`](entitlements/) — the Mach-O
+  patcher both paths above are built on: platform-tag rewriting and
+  `MH_EXECUTE` → `MH_DYLIB` conversion, both validated against a real
+  cross-compiled binary (see `AUDIT.md` section 2 and
+  `tests/test_macho_patch.py`).
 
 Run the patcher's tests with:
 

@@ -1,13 +1,29 @@
 #!/usr/bin/env python3
-"""Minimal Mach-O platform patcher for the maciOS bring-up milestone.
+"""Minimal Mach-O patcher for the maciOS bring-up milestone.
 
-Rewrites the platform tag of a thin arm64 Mach-O binary (macOS -> iOS) in
-place, then recomputes the ad-hoc CodeDirectory page hashes so the file
-stays internally consistent. No load command is resized or moved: only the
-4-byte platform field (or LC_VERSION_MIN_* command id) and the affected
-CodeDirectory hash slots are rewritten. This does not forge a trusted
-signing identity -- see docs/testing-on-device.md for why a jailbroken
-device (AMFI disabled/patched) is still required to execute the result.
+Two independent operations:
+
+  patch     Rewrite the platform tag of a thin arm64 Mach-O (macOS -> iOS)
+            in place, then recompute the ad-hoc CodeDirectory page hashes so
+            the file stays internally consistent. No load command is
+            resized or moved: only the 4-byte platform field (or
+            LC_VERSION_MIN_* command id) and the affected CodeDirectory hash
+            slots are rewritten.
+
+  dylibify  Convert an MH_EXECUTE into something dlopen() will accept as a
+            library: flip the filetype, neutralize __PAGEZERO, and write an
+            LC_ID_DYLIB into the space the original LC_LOAD_DYLINKER
+            occupied (a dylib has no use for a dynamic-linker path, and
+            that command is already sized to hold a short replacement).
+
+Neither operation forges a trusted signing identity: an ad-hoc resign here
+only keeps the file's own signature internally consistent (useful for local
+inspection), it does not make the result installable on its own. Getting a
+patched binary to actually run on a non-jailbroken device needs a real
+signing identity applied to the whole bundle at install time -- see
+AUDIT.md section 2 for why that works and docs/xcode-setup.md /
+docs/process-host.md for the two ways this repo uses the result (recompiled
+source vs. an already-compiled binary loaded by process-host/).
 """
 import argparse
 import hashlib
@@ -19,7 +35,12 @@ FAT_MAGIC = 0xCAFEBABE
 FAT_CIGAM = 0xBEBAFECA
 CPU_TYPE_ARM64 = 0x0100000C
 
+MH_EXECUTE = 0x2
+MH_DYLIB = 0x6
+
 LC_SEGMENT_64 = 0x19
+LC_LOAD_DYLINKER = 0xE
+LC_ID_DYLIB = 0xD
 LC_CODE_SIGNATURE = 0x1D
 LC_VERSION_MIN_MACOSX = 0x24
 LC_VERSION_MIN_IPHONEOS = 0x25
@@ -236,6 +257,76 @@ def patch_platform(data, header, target_platform, min_os=None, sdk=None):
     return plat
 
 
+def _text_padding_available(data, header):
+    """Bytes of unused space between the end of the load commands and the
+    first file-backed section of __TEXT -- i.e. how much room there is to
+    grow the load commands in place without relocating anything after them.
+    Compilers leave this gap because segments are page-aligned."""
+    min_section_offset = None
+    for i, off, cmd, cmdsize in iter_load_commands(data, header):
+        if cmd != LC_SEGMENT_64:
+            continue
+        segname = bytes(data[off + 8: off + 24]).rstrip(b"\x00")
+        if segname != b"__TEXT":
+            continue
+        nsects = struct.unpack_from("<I", data, off + 64)[0]
+        sect_base = off + 72  # sizeof(segment_command_64)
+        for s in range(nsects):
+            sect_off = sect_base + s * 80  # sizeof(section_64)
+            sect_file_offset = struct.unpack_from("<I", data, sect_off + 48)[0]
+            if sect_file_offset == 0:
+                continue  # zerofill section, not backed by file data
+            if min_section_offset is None or sect_file_offset < min_section_offset:
+                min_section_offset = sect_file_offset
+    end_of_cmds = 32 + header["sizeofcmds"]
+    if min_section_offset is None:
+        return 0
+    return min_section_offset - end_of_cmds
+
+
+def dylibify(data, header, install_name):
+    """Convert an MH_EXECUTE into something dlopen() will accept as a library:
+    flip the filetype to MH_DYLIB, neutralize __PAGEZERO (meaningless for a
+    binary being mapped into an already-running process), and give it an
+    LC_ID_DYLIB -- confirmed on real hardware (see AUDIT.md) that dyld
+    refuses an MH_DYLIB without one, even though the filetype flip alone is
+    otherwise accepted.
+
+    LC_ID_DYLIB is written into the existing LC_LOAD_DYLINKER command's
+    space rather than appended: a dylib has no use for LC_LOAD_DYLINKER
+    (that's an executable's pointer to /usr/lib/dyld), and it's already
+    sized to hold a 24-byte header plus a short name, so this needs no
+    load-command relocation. If no LC_LOAD_DYLINKER is present, this fails
+    rather than risk writing a corrupt binary."""
+    if header["filetype"] != MH_EXECUTE:
+        raise MachOError("filetype is %#x, not MH_EXECUTE -- already a dylib?" %
+                          header["filetype"])
+
+    dylinker_off = dylinker_cmdsize = None
+    for i, off, cmd, cmdsize in iter_load_commands(data, header):
+        if cmd == LC_SEGMENT_64:
+            segname = bytes(data[off + 8: off + 24]).rstrip(b"\x00")
+            if segname == b"__PAGEZERO":
+                struct.pack_into("<Q", data, off + 32, 0)  # vmsize
+        elif cmd == LC_LOAD_DYLINKER and dylinker_off is None:
+            dylinker_off, dylinker_cmdsize = off, cmdsize
+
+    if dylinker_off is None:
+        raise MachOError("no LC_LOAD_DYLINKER to repurpose as LC_ID_DYLIB; "
+                          "full load-command relocation isn't implemented")
+    name = install_name.encode("utf-8") + b"\x00"
+    if 24 + len(name) > dylinker_cmdsize:
+        raise MachOError("install name %r too long for the %d bytes available" %
+                          (install_name, dylinker_cmdsize - 24))
+    for i in range(dylinker_off, dylinker_off + dylinker_cmdsize):
+        data[i] = 0
+    struct.pack_into("<IIIIII", data, dylinker_off,
+                      LC_ID_DYLIB, dylinker_cmdsize, 24, 0, 0x00010000, 0x00010000)
+    data[dylinker_off + 24: dylinker_off + 24 + len(name)] = name
+
+    struct.pack_into("<I", data, 12, MH_DYLIB)
+
+
 def cmd_info(args):
     info = describe(args.binary)
     print("file:        %s (%d bytes)" % (info["file"], info["size"]))
@@ -290,6 +381,32 @@ def cmd_patch(args):
     return 0
 
 
+def cmd_dylibify(args):
+    with open(args.binary, "rb") as f:
+        data = bytearray(f.read())
+    header = parse_header(data)
+    dylibify(data, header, args.install_name or args.binary.rsplit("/", 1)[-1])
+    print("filetype: MH_EXECUTE -> MH_DYLIB, __PAGEZERO neutralized, "
+          "LC_ID_DYLIB \"%s\" written into the old LC_LOAD_DYLINKER slot" %
+          (args.install_name or args.binary.rsplit("/", 1)[-1]))
+    if args.resign:
+        header = parse_header(data)  # filetype changed; re-read before resigning
+        updated = resign_adhoc(data, header)
+        if updated is None:
+            print("warning: no LC_CODE_SIGNATURE found; nothing to resign")
+        else:
+            print("resigned %d CodeDirectory blob(s) in place (ad hoc, no trust chain -- "
+                  "if this is going into an app bundle for SideStore to install, that "
+                  "resign is discarded and replaced anyway; --no-resign skips it)" % updated)
+    else:
+        print("warning: --no-resign given; existing signature hashes are now invalid")
+    out_path = args.output or args.binary
+    with open(out_path, "wb") as f:
+        f.write(data)
+    print("wrote", out_path)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -307,6 +424,15 @@ def main(argv=None):
     p_patch.add_argument("--no-resign", dest="resign", action="store_false",
                           help="skip recomputing ad-hoc CodeDirectory hashes")
     p_patch.set_defaults(func=cmd_patch, resign=True)
+
+    p_dylibify = sub.add_parser(
+        "dylibify", help="convert MH_EXECUTE -> MH_DYLIB so dlopen() will accept it")
+    p_dylibify.add_argument("binary")
+    p_dylibify.add_argument("-o", "--output", help="output path (default: overwrite input)")
+    p_dylibify.add_argument("--install-name", help="LC_ID_DYLIB name (default: input filename)")
+    p_dylibify.add_argument("--no-resign", dest="resign", action="store_false",
+                             help="skip recomputing ad-hoc CodeDirectory hashes")
+    p_dylibify.set_defaults(func=cmd_dylibify, resign=True)
 
     args = parser.parse_args(argv)
     try:

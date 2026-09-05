@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Deliberately minimal. Results come back through the NSExtensionContext
+	reply mechanism (completeRequestReturningItems:), not a shared App Group
+	container -- ios18-probe hit App Group entitlements not surviving
+	SideStore's resign ("No shared log found (App Group entitlement may not
+	have carried through resigning...)"), so this avoids that channel
+	entirely rather than depending on it. get-task-allow is the same
+	debuggability entitlement Xcode adds by default to a personal-team
+	signed build; it is not required for this extension to load or run.
+	-->
+	<key>get-task-allow</key>
+	<true/>
+</dict>
+</plist>

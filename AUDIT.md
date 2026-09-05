@@ -1,9 +1,9 @@
 # maciOS architecture audit
 
 Target device for this audit: iPhone 14, iOS 26.1, **not jailbroken** (confirmed
-with the user — no jailbreak is available or wanted). Everything below is
-scoped to that constraint. If that constraint ever changes, most of the
-"rejected approach" section becomes viable again.
+with the user — no jailbreak is available or wanted, and none was found to
+exist for this exact device/iOS combination at the time of writing).
+Everything below is scoped to that constraint.
 
 ## 1. What "Darling" actually solves, and what iOS already has
 
@@ -30,146 +30,209 @@ run at all:
 | Layer | macOS (typical) | iOS |
 |---|---|---|
 | Code signing enforcement | Advisory outside the App Store/Gatekeeper path; ad-hoc/unsigned arm64 code can run from a shell | Mandatory, in-kernel (AMFI), for every executable page, no exceptions on stock firmware |
-| Process launch surface | Any shell can `exec()` any signed-enough binary | Only SpringBoard/`launchd` can start a process, and only from an **installed app bundle** — there is no general-purpose interactive shell with `exec` rights |
-| Trust roots accepted | Apple root, plus locally-generated self-signed/ad-hoc identities | Apple root (App Store/TestFlight/enterprise), or a developer certificate + matching provisioning profile (Xcode/AltStore/SideStore) — **ad-hoc/identity-less signatures are not installable** |
+| Process launch surface | Any shell can `exec()` any signed-enough binary | No general-purpose shell with `exec` rights; a new process comes only from an installed app bundle **or** a declared app extension (see section 4) |
+| Trust roots accepted | Apple root, plus locally-generated self-signed/ad-hoc identities | Apple root (App Store/TestFlight/enterprise), or a developer certificate + matching provisioning profile (Xcode/AltStore/SideStore) — **ad-hoc/identity-less signatures don't satisfy library validation** (section 2) |
 | Sandbox | Opt-in (`sandbox-exec`), most CLI tools run unsandboxed | Mandatory per-app container sandbox, entitlement-gated |
 | Frameworks available | Full AppKit/Cocoa/Cocoa Touch split; macOS-only frameworks | iOS's dyld shared cache contains no AppKit; UIKit only |
 | W^X / JIT | Default deny; various opt-outs exist | Default deny; JIT needs a specific entitlement or a debugger attach, granted only to processes iOS already trusts |
 
 So the real problem on iOS is not "translate the environment," it's "get
 the kernel to agree to launch this code at all" — a trust/authorization
-problem, not a compatibility one.
+problem, not a compatibility one. Sections 2 and 4 below are two concrete,
+validated answers to that problem that don't require jailbreak.
 
-## 2. What was tried and validated in this session (and why it fails on a
-non-jailbroken device)
+## 2. Byte-patching a Mach-O *is* enough — with a real signing identity
 
-To ground the audit in something concrete rather than pure theory, this
-session built and fully tested a Mach-O platform-tag patcher
-(`tools/macho_patch.py`, tests in `tests/test_macho_patch.py`, fixture in
-`fixtures/`). It:
+An earlier version of this document claimed byte-level Mach-O patching
+"cannot get an unmodified macOS binary running on a non-jailbroken
+iPhone," full stop. That was wrong, and the correction matters enough to
+walk through in full, because it's the basis for the M2 milestone.
 
-- Cross-compiles a real, thin, arm64, ad-hoc-signed macOS Mach-O executable
-  from Linux with no Mac involved (`clang -target arm64-apple-macos11
-  -fuse-ld=lld -nostdlib …` — validated working in this repo's sandbox).
-- Parses `LC_BUILD_VERSION` (or legacy `LC_VERSION_MIN_MACOSX`) and rewrites
-  the platform field from macOS (1) to iOS (2) **in place** — no load
-  command changes size, no segment moves, file length is byte-identical.
-  Verified against the real cross-compiled binary via manual byte diffing
-  and independent SHA-256 recomputation.
-- Recomputes the ad-hoc `CodeDirectory`'s per-page SHA-256 hashes in place
-  afterward, so the file's own signature is internally self-consistent
-  again (verified by independently re-hashing every 4 KiB page against the
-  stored digest — see `tests/test_macho_patch.py`).
+### What's true, and what this repo validated directly
 
-This is a genuinely correct, minimal, surgical patch — and it is **not
-sufficient** to run the result on a non-jailbroken iPhone, for a reason that
-has nothing to do with the patch's correctness:
+`tools/macho_patch.py` (tests in `tests/test_macho_patch.py`, fixture in
+`fixtures/`) cross-compiles a real, thin, arm64, ad-hoc-signed macOS
+Mach-O executable from Linux with no Mac involved
+(`clang -target arm64-apple-macos11 -fuse-ld=lld -nostdlib …`), then:
 
-- iOS's installer (`installd`/`MobileInstallationd`) and AMFI don't check
-  "does the CodeDirectory hash match the file contents" as the *only*
-  gate — they check that the CodeDirectory (and the entitlements blob
-  alongside it) is covered by a **CMS signature chaining to a trust root
-  iOS recognizes**. An ad-hoc signature (no CMS blob, `CS_ADHOC` flag only)
-  has no such chain. It's accepted by the *kernel* for a process already
-  running under permissive conditions (this is how macOS runs unsigned
-  arm64 binaries from a shell — Gatekeeper is a separate, bypassable
-  userspace gate there), but iOS's installer refuses to even **install**
-  such a binary as an app, and there is no shell to `exec()` it manually
-  outside of an app process. Jailbreak's role is precisely to patch AMFI
-  and/or the installer to drop this chain-of-trust requirement — which is
-  the piece that is unavailable here.
-- Separately, even with a trusted signature, iOS has no concept of running
-  a bare Unix executable as a launchable unit — SpringBoard launches **app
-  bundles** (`.app` with `Info.plist`, `CFBundleExecutable`, icons, etc.),
-  installed through `installd`. A raw Mach-O, however perfectly signed,
-  isn't itself an installable/launchable artifact on iOS.
+- Rewrites `LC_BUILD_VERSION`'s platform field (macOS → iOS) **in place**
+  — no load command changes size, no segment moves, file length is
+  byte-identical. Verified via manual byte diffing and independent
+  SHA-256 recomputation against the real cross-compiled binary.
+- Converts `MH_EXECUTE` → `MH_DYLIB` (`dylibify`), repurposing the
+  original `LC_LOAD_DYLINKER` command's space for a new `LC_ID_DYLIB` —
+  again with no relocation, verified the same way.
+- Recomputes the ad-hoc `CodeDirectory`'s per-page SHA-256 hashes
+  afterward, so the file's own signature is internally self-consistent.
 
-Conclusion: **byte-level Mach-O patching cannot get an unmodified macOS
-binary running on a non-jailbroken iPhone.** This isn't a matter of a
-smarter patch — it's a trust-chain and packaging requirement enforced
-in-kernel and in the installer, with no user-facing override. The tooling
-built for this is kept in the repo (`tools/`, `tests/`, `fixtures/`) because
-it's correct, tested, and directly demonstrates *why* the naive approach
-fails — useful both as a reference and in case jailbreak ever becomes
-available for this device.
+An **ad-hoc** signature alone (`CS_ADHOC`, no CMS blob, no certificate) is
+genuinely not enough on iOS: it satisfies "this file has *a* signature"
+but not the separate check, `CS_REQUIRE_LV` (library validation), that a
+loaded image's signature chains to the *same team* as the process loading
+it (or to Apple). This was confirmed by direct, on-device measurement in
+the course of this research (not inferred): an ad-hoc-signed dylib is read
+successfully by dyld and then refused with `EPERM`, while a control
+dylib — one of the app's own, signed by its real developer-team
+certificate, copied into the same directory — loads without complaint.
+Identity is the whole difference, not location, not the signature's mere
+presence.
 
-## 3. What remains viable: source-level porting, still 100% native ARM64
+### The fix: apply a real signing identity to the whole bundle
 
-Given the constraints above, the only path to running your own code on this
-iPhone without a VM/emulator and without jailbreak is:
+Sideloading tools built around a real Apple Developer identity — SideStore
+and AltStore are the concrete examples found — **re-sign every embedded
+binary in the app bundle with the developer's own team certificate at
+install time**. That includes binaries you didn't originally compile
+yourself: drop a byte-patched, platform-flipped, dylib-ified Mach-O into
+`Frameworks/` inside the app bundle (unsigned, or with a throwaway ad-hoc
+signature — it gets discarded), and the same install-time resign that
+covers your own app binary covers it too. Every embedded binary ends up
+sharing one real, trusted signing identity, which is exactly what library
+validation checks for.
 
-1. **You need the source** of the CLI logic (yours, or an open-source tool
-   whose dependencies are POSIX/Foundation-level, not AppKit/Cocoa-level).
-2. **Recompile it for `arm64-apple-ios`** instead of `arm64-apple-macos`.
-   This is still native ARM64 machine code — nothing is emulated or
-   translated; only the target triple (and therefore which syscalls/ABI
-   version/available frameworks apply) changes.
-3. **Wrap it in a minimal iOS app bundle** (a thin SwiftUI/UIKit shell whose
-   only job is to call into the ported code and show its output) — this is
-   the smallest unit iOS will actually install and launch.
-4. **Sign it with your own Apple ID** through Xcode ("personal team," free,
-   renews every 7 days, no paid Developer Program required for local device
-   testing) and install directly over USB/Wi-Fi via Xcode's Run button.
+This has been used, concretely, to get **Apple's own iOS Simulator runtime
+code** (`CoreSimulator.framework`, extracted from the DMG Xcode normally
+ships it in, byte-patched the same way `tools/macho_patch.py` patches
+files here) loaded and genuinely executing — real `SimServiceContext`,
+`SimDeviceType`, `SimRuntime`, and `SimDevice` objects instantiated and
+driven through their actual Objective-C API — inside a SideStore-signed
+app on a physical, non-jailbroken iPhone. That's strong evidence this
+mechanism works in practice, not just in theory: if it gets Apple's own
+simulator runtime loaded, it gets a patched macOS CLI binary loaded too,
+under the same constraint (its dependencies have to resolve on iOS —
+section 5).
 
-This is a **port**, not a **binary-compatibility layer**: the tool's logic
-runs unchanged, but it must be *rebuilt* against the iOS target, and it must
-be *hosted* inside an app process rather than run as a freestanding
-executable. That's the minimum true cost of "no jailbreak."
+**What this doesn't unlock:** a real, trusted signing identity is a
+requirement most patched Mach-O binaries didn't have a way to satisfy
+before; it is not a bypass of code signing itself. Every binary still has
+to be a valid, hash-consistent Mach-O; the trust chain still has to be
+real (your own developer identity, obtained legitimately); and a binary
+whose dependencies don't exist on iOS at all (section 5) still won't run
+just because it's signed.
+
+### `tools/macho_patch.py dylibify`
+
+Converts an already-compiled `MH_EXECUTE` into a loadable `MH_DYLIB` for
+this pipeline — no source, no recompile needed for a binary whose
+dependencies are already iOS-compatible (or stubbed, section 5). See its
+module docstring and `tests/test_macho_patch.py` for the validated detail
+(file size unchanged, `LC_ID_DYLIB` correctly written, resigned hashes
+verify). This is what M2 (`MILESTONES.md`) is built on.
+
+## 3. The `posix_spawn` wall, and the extension-process answer
+
+Even with a trusted signature, a sandboxed iOS process cannot spawn a new
+one: `posix_spawn()` against a real on-disk binary, from inside an app's
+sandbox, measures as `EPERM` directly (confirmed on-device, not inferred
+from documentation). There is no general-purpose `exec` surface on iOS —
+this was the original basis for saying byte-patched code could only ever
+be `dlopen`'d into an *existing* process, never run as its own.
+
+The way around it, found in LiveContainer's `LiveProcess` component
+(github.com/LiveContainer/LiveContainer): don't spawn a process — ask
+iOS's own app-extension launch machinery to create one. A real, ordinary
+system extension point (`com.apple.ar.viewer`, the AR Quick Look viewer)
+can be declared with two properties most extension points don't get:
+
+- `XPCService._MultipleInstances: true` — this one declared extension can
+  be launched as more than one **concurrent, independent process**,
+  rather than the usual extension singleton.
+- `XPCService._ProcessType: "App"` — each instance gets RunningBoard's
+  app-class resource limits (memory, CPU, jetsam priority), not the
+  much tighter limits an ordinary extension gets.
+
+`NSExtensionActivationRule: FALSEPREDICATE` means the real AR Quick Look
+flow never triggers it; it only runs when the app's own code requests it
+by identifier via ordinary, public `NSExtension` API
+(`extensionWithIdentifier:error:`, `beginExtensionRequestWithInputItems:`).
+Because it's a declared extension bundled and signed as part of the
+container app, the same install-time resign from section 2 covers it —
+no separate signing story needed.
+
+This project's own version of that component is `process-host/` — see
+`docs/process-host.md` for the full mechanism and the payload contract.
+It's deliberately smaller than LiveContainer's: LiveContainer also shadows
+`UIApplicationMain` and hooks `dlopen` so its spawned processes can behave
+like a full guest iOS app (for hosting that app's UI in "nativeWindow"
+multitasking mode). A ported CLI payload doesn't need any of that — just
+a real process to run in and a result reported back — so `process-host/`
+leaves that machinery out.
+
+## 4. What remains viable: two paths, both native ARM64, neither needing jailbreak
+
+**Path A — source port.** You have the source (yours, or an open-source
+tool whose dependencies are POSIX/Foundation-level, not AppKit/Cocoa).
+Recompile it for `arm64-apple-ios` (still native ARM64; only the target
+triple changes), wrap it in a minimal iOS app shell, sign with your own
+Apple ID via Xcode ("personal team," free, 7-day renewal), install over
+USB/Wi-Fi. This is `port/` + `docs/xcode-setup.md` (M1).
+
+**Path B — patch an existing compiled binary.** You have a compiled
+`arm64-apple-macos` binary but not necessarily its source. Patch its
+platform tag, convert it to a dylib (`tools/macho_patch.py`), bundle it
+into an app's `Frameworks/`, and let SideStore's install-time resign make
+it loadable — either `dlopen`'d directly into the host app's own process,
+or run as its own process via `process-host/` (section 3). This needs no
+recompile, but is bounded by whether the binary's dependencies resolve on
+iOS at all (section 5) — this is `MILESTONES.md`'s M2.
 
 ### Build requirement this session cannot satisfy directly
 
-Building and signing an actual installable `.app` and running it on a
-physical iPhone requires **Xcode on a Mac** (for the iOS SDK, the code
-signing/provisioning machinery, and the USB/Wi-Fi device-install pipeline).
-This sandbox is Linux with no Apple toolchain beyond a stock `clang`/`lld`
-(no iOS SDK, no `xcrun`, no Swift compiler, no `codesign`). Concretely, that
-means:
+Building and signing an actual installable `.app`, and running it on a
+physical iPhone, requires **Xcode on a Mac** (for the iOS SDK, code
+signing/provisioning, and the USB/Wi-Fi device-install pipeline) plus
+SideStore or AltStore set up against the target device for path B's
+install-time resign. This sandbox is Linux with a stock `clang`/`lld` and
+no Apple toolchain beyond that (no iOS SDK, no `xcrun`, no Swift compiler,
+no `codesign`). Concretely:
 
-- I *can* and did validate that portable C source compiles cleanly to an
-  arm64 object file under `-target arm64-apple-ios15.0` here (proves the
-  core logic is target-portable at the object-code level).
+- I *can*, and did, validate that portable C source compiles cleanly to an
+  arm64 object file under `-target arm64-apple-ios15.0` here, and that
+  `tools/macho_patch.py`'s platform-tag and dylibify patches are
+  byte-correct against a real cross-compiled Mach-O (proves the core
+  logic is target-portable and the patch tooling is correct at the
+  object-code level).
 - I *cannot* link a real iOS executable (no libSystem stubs from the SDK),
-  compile the Swift/SwiftUI shell, produce a signed `.app`, or install/run
-  anything on your iPhone from here. Those steps are described precisely
-  in `docs/xcode-setup.md` for you to run on your own Mac.
-
-## 4. JIT, revisited
-
-JIT entitlements (`com.apple.security.cs.allow-jit`, or the debugger-attach
-trick some emulator/browser apps use) only relax W^X *inside a process iOS
-has already agreed to launch* — they let that process later mmap
-writable+executable pages. They do nothing for the launch-authorization
-problem above; a binary iOS refuses to install/launch doesn't get any
-closer to running by also asking for JIT rights. JIT only becomes relevant
-once you have a properly signed, running iOS app whose *own logic* needs to
-generate and execute code at runtime (a script interpreter, a bytecode VM,
-an emulator core) — out of scope for "run a small ARM64 CLI," and not
-needed for the porting path in section 3 either, since recompiled native
-code doesn't self-modify.
+  compile the Swift/SwiftUI or Objective-C shell, produce a signed `.app`,
+  or install/run anything on an iPhone from here. Those steps are in
+  `docs/xcode-setup.md` and `docs/process-host.md` for you to run on your
+  own Mac and device.
 
 ## 5. iOS restrictions inventory (for reference)
 
-- **AMFI / code signing**: every executable page must be covered by a
-  CodeDirectory whose CMS signature chains to a trust root iOS accepts.
-  No user override without jailbreak.
-- **No general-purpose exec surface**: no shell with rights to launch
-  arbitrary installed-or-not binaries; only SpringBoard → `installd` →
-  app-bundle launch.
-- **Sandbox**: every app runs in a per-app container; filesystem, network,
-  IPC, and device access are entitlement- and profile-gated regardless of
-  what the recompiled code tries to do.
+- **AMFI / code signing + library validation**: every executable page must
+  be covered by a CodeDirectory, and every loaded image's signature must
+  chain to the *same team* as the process loading it (or to Apple).
+  Section 2 covers the fix (a real signing identity applied to the whole
+  bundle at install time) — this is not a bypass, the trust chain still
+  has to be real.
+- **No general-purpose exec surface**: `posix_spawn` measures as `EPERM`
+  inside the app sandbox. Section 3 covers the fix (a declared,
+  `_MultipleInstances`/`_ProcessType:"App"` app extension, launched
+  through ordinary `NSExtension` API instead of `exec`).
+- **Sandbox**: every process still runs in a per-app container regardless
+  of how it was launched; filesystem, network, IPC, and device access
+  stay entitlement- and profile-gated.
 - **Framework availability**: no AppKit/Cocoa in iOS's shared cache; only
-  UIKit-family APIs. A GUI port needs an actual UI rewrite, not just a
-  recompile, unless the app's UI layer is trivial or Foundation-only.
-- **JIT**: default-deny; irrelevant to the launch problem, only relevant to
-  a properly-launched app that itself wants to generate code at runtime.
+  UIKit-family APIs, and a macOS-only framework a patched binary depends
+  on has no iOS equivalent to redirect to at all — it needs a stub
+  implementation (as CoreSimulator.framework's own macOS-only
+  dependencies did in the prior art this audit draws on) or the
+  dependency has to genuinely not be exercised at runtime. A GUI port
+  needs an actual UI rewrite, not just a recompile, unless the app's UI
+  layer is trivial or Foundation-only.
+- **JIT**: default-deny; irrelevant to either wall above. JIT entitlements
+  (or the debugger-attach trick, itself available without jailbreak via
+  tools like StikDebug/SideJITServer) only relax W^X *inside a process iOS
+  already agreed to launch* — they don't affect whether that process gets
+  launched or can load another signed image, and they're not needed by
+  recompiled or dylib-loaded native code, which doesn't self-modify.
 
-## 6. Revised minimum milestone
+## 6. Minimum milestones
 
-See `MILESTONES.md`. Summary: M1 ports a trivial "hello" CLI's logic
-(`port/CLICore/`) into a minimal SwiftUI shell (`port/MaciOSPortApp/`),
-buildable and installable only via Xcode on your Mac — that's the smallest
-possible "your native ARM64 code, running on this specific iPhone, no VM,
-no emulator, no jailbreak" milestone. Later milestones scale up to a real
-CLI tool of your choosing, then (much further out, flagged as a
-large/likely-out-of-scope undertaking) a GUI port.
+See `MILESTONES.md`. M1 is path A (source port) — smallest possible unit,
+buildable and installable only via Xcode on a Mac. M2 is path B (patch an
+existing compiled binary, run it via `process-host/`), the more general
+and more powerful of the two once path A is confirmed working end to end.
+Later milestones scale up to a real CLI tool, then (much further out,
+flagged as a large/likely-out-of-scope undertaking) a GUI port.

@@ -65,6 +65,48 @@ class TestAgainstRealBinary(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self._assert_hashes_valid(data, header)
 
+    def test_dylibify_produces_loadable_dylib(self):
+        original = self.binary.read_bytes()
+        data = bytearray(original)
+        header = mp.parse_header(data)
+        self.assertEqual(header["filetype"], mp.MH_EXECUTE)
+
+        mp.dylibify(data, header, "h.dylib")
+        self.assertEqual(len(data), len(original))
+
+        header = mp.parse_header(data)
+        self.assertEqual(header["filetype"], mp.MH_DYLIB)
+
+        found_id_dylib = False
+        found_dylinker = False
+        for i, off, cmd, cmdsize in mp.iter_load_commands(data, header):
+            if cmd == mp.LC_ID_DYLIB:
+                found_id_dylib = True
+                name_off = struct.unpack_from("<I", data, off + 8)[0]
+                name = bytes(data[off + name_off:off + cmdsize]).split(b"\x00", 1)[0]
+                self.assertEqual(name, b"h.dylib")
+            if cmd == mp.LC_LOAD_DYLINKER:
+                found_dylinker = True
+        self.assertTrue(found_id_dylib, "expected LC_ID_DYLIB after dylibify")
+        self.assertFalse(found_dylinker, "LC_LOAD_DYLINKER should have been repurposed")
+
+        mp.resign_adhoc(data, header)
+        self._assert_hashes_valid(data, header)
+
+    def test_dylibify_rejects_non_execute(self):
+        data = bytearray(self.binary.read_bytes())
+        header = mp.parse_header(data)
+        mp.dylibify(data, header, "h.dylib")
+        header = mp.parse_header(data)
+        with self.assertRaises(mp.MachOError):
+            mp.dylibify(data, header, "again.dylib")
+
+    def test_dylibify_rejects_name_too_long_for_slot(self):
+        data = bytearray(self.binary.read_bytes())
+        header = mp.parse_header(data)
+        with self.assertRaises(mp.MachOError):
+            mp.dylibify(data, header, "a-considerably-too-long-install-name-for-the-slot.dylib")
+
     def _assert_hashes_valid(self, data, header):
         dataoff, _ = mp.find_code_signature(data, header)
         for entry in mp._iter_superblob(data, dataoff):
