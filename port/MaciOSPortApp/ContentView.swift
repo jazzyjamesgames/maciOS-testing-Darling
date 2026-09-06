@@ -63,6 +63,14 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
 
+            Button("Introspect NSExtensionContext") {
+                log.log("Introspect NSExtensionContext tapped")
+                MaciOSIntrospectNSExtensionContext { line in
+                    log.log(line)
+                }
+            }
+            .buttonStyle(.bordered)
+
             Button("Copy Log") {
                 log.copyToPasteboard()
             }

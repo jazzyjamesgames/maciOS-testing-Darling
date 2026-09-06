@@ -148,26 +148,47 @@ process launches: `extensionWithIdentifier:error:`,
 `setRequestCancellationBlock:`/`setRequestInterruptionBlock:`. None of
 those needed to observe `main.m`'s `completeRequestReturningItems:` reply
 payload, because neither project asked "what did the extension hand
-back," only "did a separate process come up." Whether a distinct method
-exists for that -- and whether `beginExtensionRequestWithInputItems:completion:`'s
-own completion block is the same "launched" signal `pidForRequestIdentifier:`
-already provides, or something later -- is architecturally unclear from
-the outside: a completion block that fires at launch time (matching the
-timing `ios18-probe` observed) can't also be the vehicle for a result that
-only exists once the extension's work has *finished*, which happens
-later.
+back," only "did a separate process come up."
 
 Rather than guess at a wider block signature, `NSExtensionIntrospection.h`/`.m`
-asks the real, loaded `NSExtension` class what its actual method surface
-is, using `class_copyMethodList`/`method_getTypeEncoding` -- the same
-"ask the runtime directly" technique `ios18-probe` used against
-CoreSimulator. The "Introspect NSExtension" button in `ContentView.swift`
-dumps every instance and class method, with its raw type encoding, to the
-in-app log. Once that dump is read back (see `docs/getting-logs.md`),
-whatever it reveals decides the next step: wiring a real reply-observing
-method if one exists, or falling back to Darwin notifications (per
-`ios18-probe`'s own fallback, since App Group files didn't survive
-SideStore's resign) if it doesn't.
+asks the real, loaded `NSExtension` and `NSExtensionContext` classes what
+their actual method surfaces are, using
+`class_copyMethodList`/`method_getTypeEncoding` -- the same "ask the
+runtime directly" technique `ios18-probe` used against CoreSimulator. Two
+buttons in `ContentView.swift` ("Introspect NSExtension" and "Introspect
+NSExtensionContext") dump every instance and class method, with its raw
+type encoding, to the in-app log.
+
+**`NSExtension`'s dump, confirmed on-device 2026-09-06: the answer is no,
+not through this class.** There is no `resultForRequestIdentifier:`,
+`outputItemsForRequestIdentifier:`, or any other accessor exposing
+`completeRequestReturningItems:`'s payload -- `pidForRequestIdentifier:`
+is the *only* per-request state `NSExtension` exposes after launch. So as
+currently written, `main.m`'s reply payload is unobservable from the host
+side; the caution in this doc and in `MaciOSPortApp`'s own code comments
+was warranted, not just theoretical.
+
+**The dump did surface a real lead, though.** Two methods take an extra
+`NSXPCListenerEndpoint` argument the plain `...completion:` variants
+don't: `beginExtensionRequestWithInputItems:listenerEndpoint:completion:`
+and `beginExtensionRequestWithOptions:inputItems:listenerEndpoint:completion:`.
+That's the standard Apple shape for "the spawned side gets a live
+connection back to the caller": set up an `NSXPCListener` in the host app,
+hand its endpoint into the request via one of these two methods, and have
+`process-host/main.m` open an `NSXPCConnection` to it and call an exported
+protocol method directly with a real result -- a genuinely different
+channel from `completeRequestReturningItems:`, not a variation on it.
+
+The open part: *how* `main.m` gets that endpoint back out on the
+extension side is a question about `NSExtensionContext`, a different
+class than the one that revealed the lead -- hence the second
+introspection button, not yet read back as of this writing. Until that
+dump is read, treat the listener-endpoint approach as a promising
+direction, not a confirmed mechanism.
+
+If neither `NSExtensionContext` nor further work on the listener-endpoint
+idea pans out, whatever `ios18-probe` fell back to (Darwin notifications,
+since App Group files didn't survive SideStore's resign) is next to try.
 
 ## Known limitations (carried over from ios18-probe's findings, or found here)
 

@@ -1,33 +1,36 @@
 #import "NSExtensionIntrospection.h"
 #import <objc/runtime.h>
 
-void MaciOSIntrospectNSExtension(void (^log)(NSString *line)) {
-  Class cls = NSClassFromString(@"NSExtension");
-  if (!cls) {
-    log(@"NSExtension: class not found via NSClassFromString");
-    return;
-  }
-  log([NSString stringWithFormat:@"NSExtension real class found: %@", cls]);
-
+static void logMethods(Class cls, BOOL isMeta, void (^log)(NSString *line)) {
   unsigned int count = 0;
   Method *methods = class_copyMethodList(cls, &count);
-  log([NSString stringWithFormat:@"NSExtension instance methods: %u", count]);
+  log([NSString stringWithFormat:@"%@ %@ methods: %u", NSStringFromClass(cls),
+                                  isMeta ? @"class" : @"instance", count]);
   for (unsigned int i = 0; i < count; i++) {
     SEL sel = method_getName(methods[i]);
     const char *encoding = method_getTypeEncoding(methods[i]);
-    log([NSString stringWithFormat:@"  -%@  %s", NSStringFromSelector(sel),
+    log([NSString stringWithFormat:@"  %@%@  %s", isMeta ? @"+" : @"-",
+                                    NSStringFromSelector(sel),
                                     encoding ?: "(no encoding)"]);
   }
   if (methods) free(methods);
+}
 
-  unsigned int classCount = 0;
-  Method *classMethods = class_copyMethodList(object_getClass(cls), &classCount);
-  log([NSString stringWithFormat:@"NSExtension class methods: %u", classCount]);
-  for (unsigned int i = 0; i < classCount; i++) {
-    SEL sel = method_getName(classMethods[i]);
-    const char *encoding = method_getTypeEncoding(classMethods[i]);
-    log([NSString stringWithFormat:@"  +%@  %s", NSStringFromSelector(sel),
-                                    encoding ?: "(no encoding)"]);
+void MaciOSIntrospectClass(NSString *className, void (^log)(NSString *line)) {
+  Class cls = NSClassFromString(className);
+  if (!cls) {
+    log([NSString stringWithFormat:@"%@: class not found via NSClassFromString", className]);
+    return;
   }
-  if (classMethods) free(classMethods);
+  log([NSString stringWithFormat:@"%@ real class found: %@", className, cls]);
+  logMethods(cls, NO, log);
+  logMethods(object_getClass(cls), YES, log);
+}
+
+void MaciOSIntrospectNSExtension(void (^log)(NSString *line)) {
+  MaciOSIntrospectClass(@"NSExtension", log);
+}
+
+void MaciOSIntrospectNSExtensionContext(void (^log)(NSString *line)) {
+  MaciOSIntrospectClass(@"NSExtensionContext", log);
 }
