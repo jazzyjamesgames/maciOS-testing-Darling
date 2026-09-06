@@ -154,17 +154,24 @@ touching its source.
       point doesn't accept a caller-supplied listener endpoint this way.
       Reverted rather than kept as known-broken code; see
       `docs/process-host.md`'s reply-channel section for the full record.
-      **Third attempt, built and awaiting on-device confirmation**: Darwin
+      **Third attempt, also ruled out on-device (2026-09-06)**: Darwin
       notifications (`CFNotificationCenterGetDarwinNotifyCenter()`) --
       real, public, documented API, unlike the two private-API attempts
-      above, and `ios18-probe`'s own fallback once it found App Group files
-      don't survive SideStore's resign. The exit code/error is encoded
-      directly into the notification's own name (no `userInfo` payload on
-      the Darwin center), scoped by a host-chosen `requestUUID`, shared
-      between `ProcessHostTester.m` and `process-host/main.m` via
-      `process-host/MaciOSProcessHostDarwinReply.h`/`.m`. Logs a `REPLY:
-      exitCode=... error=...` line in `ContentView.swift`'s two "Test
-      ProcessHost" buttons if and when it arrives.
+      above. The exit code/error was encoded directly into the
+      notification's own name (no `userInfo` payload on the Darwin
+      center), scoped by a host-chosen `requestUUID`. This depended on
+      registering with a `NULL` name ("observe everything," since the
+      exact name — containing the exit code — can't be known in advance)
+      -- **confirmed not to work**: a dedicated sniffer
+      (`port/MaciOSPortApp/DarwinNotificationSniffer.h`/`.m`) logged zero
+      notifications over 27 seconds spanning two real ProcessHost
+      launches, ruling out both "the extension didn't post" and "a name
+      mismatch" (either would still have let unrelated system
+      notifications through) — the wildcard registration itself doesn't
+      work on the Darwin center on this device. Three mechanisms ruled out
+      now; see `docs/process-host.md` for the fixed-name-space redesign
+      that would still work, not yet built pending a decision on whether
+      it's worth the complexity (nothing in M1/M2 needs it).
 - [x] Dependency-resolution tooling built ahead of a specific M3 target
       (see `docs/dependency-resolution.md`): `tools/macho_patch.py deps`
       lists a binary's `LC_LOAD_DYLIB`-family dependencies;

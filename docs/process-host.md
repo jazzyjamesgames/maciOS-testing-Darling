@@ -256,24 +256,56 @@ regardless of whether `process-host/main.m` posted its reply correctly --
 which matches what was observed.
 
 **`port/MaciOSPortApp/DarwinNotificationSniffer.h`/`.m`** (+ a "Sniff
-Darwin Notifications" button) tests this specific hypothesis in
-isolation: it registers with `NULL` the same way, but logs *any*
-notification it receives -- including ones this app had nothing to do
-with, which the system posts constantly regardless of what this app does.
-If tapping this button and waiting produces zero log lines, that confirms
-the wildcard registration itself doesn't work on the Darwin center on this
-device/OS version, independent of anything else in the reply-channel code.
-If it logs unrelated system notifications but still never the app's own
-reply, the bug is elsewhere (the extension not posting, a name-encoding
-mismatch) -- a different, more specific thing to chase next.
+Darwin Notifications" button) tested this specific hypothesis in
+isolation: registers with `NULL` the same way, but logs *any* notification
+it receives -- including ones this app had nothing to do with, which the
+system posts constantly regardless of what this app does.
+
+**Confirmed on-device 2026-09-06: zero notifications logged over 27
+seconds**, spanning two ProcessHost launches (each of which should have
+triggered `main.m`'s own post) and the ordinary background rate of
+unrelated system Darwin notifications. Not a single one arrived -- the
+`NULL`-name wildcard registration does not work on the Darwin center on
+this device/OS, full stop. This is a clean result, not an ambiguous one:
+zero of *anything* rules out both "the extension didn't post" and "the
+name encoding didn't match" as explanations, since either of those would
+still have let *unrelated* system notifications through. The registration
+mechanism itself is the dead end.
+
+**So this is the third reply-channel mechanism ruled out on-device**,
+after `completeRequestReturningItems:` (no host-side accessor at all) and
+the `NSXPCListenerEndpoint`/`_auxiliaryListener` approach (rejected
+outright by this extension point). All three shared one root cause this
+project's whole existing signal (`pidForRequestIdentifier:`) doesn't have:
+each needed to observe or register for *something not fully known in
+advance* -- a result payload, an endpoint the extension point would
+accept, a notification name containing an unpredictable exit code -- and
+each channel's real behavior (not its documented contract) turned out not
+to support that.
+
+**What would still work, if this is worth a fourth attempt:** Darwin
+notifications *do* support exact-name registration reliably (this is how
+`main.m`'s own reply attempt would have been received, had the name been
+predictable) -- the failure is specifically the wildcard. A genuinely
+fixed, fully-enumerable name space sidesteps it: e.g. encode a small
+integer exit code as up to 8 individually pre-registered exact
+notifications (`...reply.<uuid>.bit0` through `...bit7`, posted only for
+set bits), rather than one name containing the value. Inelegant, but
+real -- unlike the three attempts above, it wouldn't depend on any
+undocumented behavior actually working. Not built, pending a decision on
+whether this is worth the added complexity versus deprioritizing the
+reply channel (nothing in M1/M2's own claim needs it -- both payloads
+already confirm success via `pidForRequestIdentifier:`).
 
 ## Known limitations (carried over from ios18-probe's findings, or found here)
 
-- **The exit-code/error reply path's status: two mechanisms ruled out,
-  one (Darwin notifications) built and awaiting on-device confirmation.**
-  `completeRequestReturningItems:` and the auxiliary-connection
-  listener-endpoint approach don't work, per above; treat `main.m`'s
-  `completeRequestReturningItems:` payload specifically as write-only.
+- **The exit-code/error reply path has no working mechanism, after three
+  attempts.** `completeRequestReturningItems:`, the auxiliary-connection
+  listener-endpoint approach, and Darwin notifications (`NULL`-name
+  wildcard registration) were all tried and ruled out on-device -- see
+  above. Treat `main.m`'s `completeRequestReturningItems:`/
+  `CFNotificationCenterPostNotification` calls as write-only until a
+  fixed-name-space redesign (above) or something new is tried.
 - **One call per process instance, for now.** Each extension request gets
   a fresh process; there's no persistent "keep it running and call it
   again" path implemented here yet.
