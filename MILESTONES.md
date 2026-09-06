@@ -99,17 +99,42 @@ touching its source.
       If not, whatever channel `ios18-probe` fell back to (Darwin
       notifications, since App Group files didn't survive SideStore's
       resign) is the next thing to try.
-- [ ] Next real step: pick a real small, portable (no AppKit/Cocoa,
-      libSystem/Foundation/CoreFoundation-level dependencies only) macOS
-      CLI binary — or reuse `fixtures/hello.s`'s pattern, adapted to
-      export a named `int name(void)` entry point instead of calling
-      `exit()` directly. Patch it (`patch --platform ios`, then
-      `dylibify --no-resign`), add it to the Xcode project as a "Copy
-      Files" build phase input targeting `Frameworks/` (same as
-      `TestPayload`), and point `ProcessHostTester`'s `dylibPath` at it
-      instead.
-- [ ] Expect to spend most of the effort on dependency resolution once a
-      real tool is the target: any macOS-only framework the binary links
+- [x] `fixtures/macos_payload.c` + `test-payload/build-and-patch.sh` +
+      `tools/macho_patch.py symbols` — the actual end-to-end pipeline
+      (compile for macOS, never iOS → `patch --platform ios` → `dylibify`)
+      run against a real binary, not a shortcut. Structurally validated in
+      this sandbox: the exported entry point (`maciOS_patched_payload_entry`)
+      survives with external linkage intact (`tests/test_macho_patch.py`'s
+      `TestFullPipelineAgainstRealPayload`). Also surfaced a real, general
+      finding: the `dylibify` install-name slot is always tiny (~7-8 bytes)
+      for *any* normally-linked executable, not just this project's
+      fixtures — `LC_LOAD_DYLINKER` always names `/usr/lib/dyld`, and
+      that's the space being repurposed. `docs/process-host.md`'s example
+      is corrected accordingly.
+- [x] `project.yml` embeds the result (`test-payload/PatchedMacOSPayload.dylib`)
+      via a Copy Files build phase in `MaciOSPortApp` (Xcode's own signing
+      covers it, same as `ProcessHost`/`TestPayload` — no SideStore
+      needed); `ProcessHostTester` is generalized to take a payload
+      path/entry-point pair, and `ContentView.swift` now has a second
+      button, "Test ProcessHost (patched macOS binary)", alongside the
+      already-confirmed native control.
+- [ ] **On your device**: tap "Test ProcessHost (patched macOS binary)"
+      and report back the log. This is the actual, un-shortcut M2 claim —
+      a binary that was genuinely never compiled for iOS, running via
+      `process-host/` after nothing but byte-level patching. Everything
+      before this point (M1, M2's native-payload test) used Xcode to
+      compile for iOS at some stage; this is the first test that doesn't.
+- [ ] Follow-up, not blocking: confirm the exit-code/error reply path
+      (`process-host/main.m`'s `completeRequestReturningItems:`) is
+      actually observable by the caller — still unverified per
+      `docs/process-host.md`. Both payloads return a distinctive value
+      (`42` native, `99` patched) specifically so this is easy to check
+      once it's worth wiring in. If the reply channel doesn't pan out,
+      whatever `ios18-probe` fell back to (Darwin notifications, since
+      App Group files didn't survive SideStore's resign) is next to try.
+- [ ] Once a real (non-trivial) macOS binary is the target, expect to
+      spend most of the effort on dependency resolution: any macOS-only
+      framework the binary links
       against needs either a redirect to iOS's real equivalent (if one
       exists, just under a different path — `Foundation`, `CoreFoundation`,
       `CoreGraphics`, `Security` are the ones confirmed to have iOS

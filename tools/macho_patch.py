@@ -39,6 +39,7 @@ MH_EXECUTE = 0x2
 MH_DYLIB = 0x6
 
 LC_SEGMENT_64 = 0x19
+LC_SYMTAB = 0x2
 LC_LOAD_DYLINKER = 0xE
 LC_ID_DYLIB = 0xD
 LC_CODE_SIGNATURE = 0x1D
@@ -316,7 +317,15 @@ def dylibify(data, header, install_name):
                           "full load-command relocation isn't implemented")
     name = install_name.encode("utf-8") + b"\x00"
     if 24 + len(name) > dylinker_cmdsize:
-        raise MachOError("install name %r too long for the %d bytes available" %
+        # Not fixture-specific: LC_LOAD_DYLINKER always names /usr/lib/dyld,
+        # for any normally-linked Mach-O executable, so this slot is capped
+        # at roughly the same tiny size (~8 bytes) regardless of what real
+        # binary is being converted. Confirmed against a real cross-compiled
+        # macOS executable, not just this repo's own fixtures.
+        raise MachOError("install name %r too long for the %d bytes available "
+                          "(this slot is always small -- LC_LOAD_DYLINKER "
+                          "names /usr/lib/dyld for any normal executable, "
+                          "not just this one)" %
                           (install_name, dylinker_cmdsize - 24))
     for i in range(dylinker_off, dylinker_off + dylinker_cmdsize):
         data[i] = 0
@@ -325,6 +334,39 @@ def dylibify(data, header, install_name):
     data[dylinker_off + 24: dylinker_off + 24 + len(name)] = name
 
     struct.pack_into("<I", data, 12, MH_DYLIB)
+
+
+N_EXT = 0x01
+N_TYPE = 0x0E
+N_UNDF = 0x00
+
+
+def list_symbols(data, header):
+    """Yield {'name', 'external', 'defined', 'value'} for every symbol in
+    the file's LC_SYMTAB. Useful for confirming a specific entry point
+    survives patch/dylibify with external linkage intact -- e.g. that
+    dlsym() will actually be able to find it -- rather than just assuming
+    a byte-level patch didn't disturb the symbol table."""
+    symoff = nsyms = stroff = None
+    for i, off, cmd, cmdsize in iter_load_commands(data, header):
+        if cmd == LC_SYMTAB:
+            symoff, nsyms, stroff, _strsize = struct.unpack_from("<IIII", data, off + 8)
+            break
+    if symoff is None:
+        return
+    for i in range(nsyms):
+        entry_off = symoff + i * 16  # sizeof(struct nlist_64)
+        n_strx, n_type, _n_sect, _n_desc, n_value = struct.unpack_from(
+            "<IBBHQ", data, entry_off)
+        name_off = stroff + n_strx
+        name_end = data.index(b"\x00", name_off)
+        name = bytes(data[name_off:name_end]).decode("utf-8", "replace")
+        yield {
+            "name": name,
+            "external": bool(n_type & N_EXT),
+            "defined": (n_type & N_TYPE) != N_UNDF,
+            "value": n_value,
+        }
 
 
 def cmd_info(args):
@@ -348,6 +390,25 @@ def cmd_info(args):
                        blob["nSpecialSlots"], blob["codeLimit"]))
     else:
         print("code sig:    <none>")
+    return 0
+
+
+def cmd_symbols(args):
+    with open(args.binary, "rb") as f:
+        data = bytearray(f.read())
+    header = parse_header(data)
+    found = False
+    for sym in list_symbols(data, header):
+        if args.defined_only and not sym["defined"]:
+            continue
+        if args.grep and args.grep not in sym["name"]:
+            continue
+        found = True
+        print("%-40s external=%d defined=%d value=%#x" %
+              (sym["name"], sym["external"], sym["defined"], sym["value"]))
+    if args.grep and not found:
+        print("error: no symbol matching %r found" % args.grep, file=sys.stderr)
+        return 1
     return 0
 
 
@@ -433,6 +494,15 @@ def main(argv=None):
     p_dylibify.add_argument("--no-resign", dest="resign", action="store_false",
                              help="skip recomputing ad-hoc CodeDirectory hashes")
     p_dylibify.set_defaults(func=cmd_dylibify, resign=True)
+
+    p_symbols = sub.add_parser(
+        "symbols", help="list LC_SYMTAB symbols (e.g. to confirm an entry point survived patching)")
+    p_symbols.add_argument("binary")
+    p_symbols.add_argument("--grep", help="only show symbols containing this substring; "
+                                           "exit 1 if none match (for CI scripting)")
+    p_symbols.add_argument("--defined-only", action="store_true",
+                            help="skip undefined (imported) symbols")
+    p_symbols.set_defaults(func=cmd_symbols)
 
     args = parser.parse_args(argv)
     try:

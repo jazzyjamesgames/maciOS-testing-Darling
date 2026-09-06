@@ -5,10 +5,20 @@ import SwiftUI
 // whether clicore.c was compiled for arm64-apple-macos or arm64-apple-ios.
 // Confirmed working on-device 2026-09-06 -- see MILESTONES.md.
 //
-// The "Test ProcessHost" button is M2's on-device test: does the
-// com.apple.ar.viewer extension trick in process-host/ actually get a
-// real, separate OS process? See ProcessHostTester.m for exactly what
-// this does and doesn't verify.
+// Two ProcessHost buttons, testing two different things:
+//   - "Test ProcessHost (native)": TestPayload.c, compiled straight for
+//     iOS by Xcode. A control -- confirms the com.apple.ar.viewer
+//     extension trick itself gets a real separate process, decoupled
+//     from any question about a foreign binary's own compatibility.
+//     Confirmed working on-device 2026-09-06 (pid 1867 -> 1869).
+//   - "Test ProcessHost (patched macOS binary)": PatchedMacOSPayload.dylib,
+//     produced by test-payload/build-and-patch.sh from a binary compiled
+//     for arm64-apple-macos and never recompiled for iOS -- run through
+//     tools/macho_patch.py's actual patch+dylibify pipeline instead. This
+//     is the real M2 claim ("you don't need the source"), not yet
+//     confirmed on-device as of this build.
+// See ProcessHostTester.m for exactly what either test does and doesn't
+// verify.
 //
 // The log view + copy button exist so a real on-device run produces
 // something that can actually be debugged: see DebugLog.swift for why the
@@ -31,8 +41,17 @@ struct ContentView: View {
             }
             .frame(maxHeight: .infinity)
 
-            Button("Test ProcessHost") {
-                testProcessHost()
+            Button("Test ProcessHost (native)") {
+                testProcessHost(frameworksRelativePath: "TestPayload.framework/TestPayload",
+                                 entryPoint: "maciOS_test_entry",
+                                 label: "native")
+            }
+            .buttonStyle(.bordered)
+
+            Button("Test ProcessHost (patched macOS binary)") {
+                testProcessHost(frameworksRelativePath: "PatchedMacOSPayload.dylib",
+                                 entryPoint: "maciOS_patched_payload_entry",
+                                 label: "patched")
             }
             .buttonStyle(.bordered)
 
@@ -50,13 +69,13 @@ struct ContentView: View {
         }
     }
 
-    private func testProcessHost() {
-        log.log("Test ProcessHost tapped: my pid is \(ProcessInfo.processInfo.processIdentifier)")
-        MaciOSTestProcessHost { launched, pid, message in
+    private func testProcessHost(frameworksRelativePath: String, entryPoint: String, label: String) {
+        log.log("Test ProcessHost (\(label)) tapped: my pid is \(ProcessInfo.processInfo.processIdentifier)")
+        MaciOSTestProcessHost(frameworksRelativePath, entryPoint) { launched, pid, message in
             if launched {
-                log.log("ProcessHost LAUNCHED, reported pid=\(pid)")
+                log.log("ProcessHost (\(label)) LAUNCHED, reported pid=\(pid)")
             } else {
-                log.log("ProcessHost FAILED: \(message ?? "(no message)")")
+                log.log("ProcessHost (\(label)) FAILED: \(message ?? "(no message)")")
             }
         }
     }

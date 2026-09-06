@@ -6,6 +6,13 @@
 // FoundationPrivate.h -- reused verbatim rather than guessed at, since this
 // is the one part of this whole pipeline with no public documentation to
 // fall back on if the shape is wrong.
+//
+// Parameterized over which payload to load so the same invocation code
+// serves two different tests: TestPayload.framework/TestPayload (compiled
+// straight for iOS by Xcode, a control -- proves the process-host
+// mechanism itself works) and PatchedMacOSPayload.dylib (a real macOS
+// binary run through tools/macho_patch.py's actual patch+dylibify
+// pipeline -- proves the thing M2 is actually about).
 #import "ProcessHostTester.h"
 
 @interface NSExtension : NSObject
@@ -26,7 +33,9 @@
 // or proven mechanism is still an open question -- see docs/process-host.md.
 // Better to ship a smaller, honestly-scoped test now than a bigger one
 // built on an unverified assumption.
-void MaciOSTestProcessHost(MaciOSProcessHostResult completion) {
+void MaciOSTestProcessHost(NSString *frameworksRelativePath,
+                           NSString *entryPoint,
+                           MaciOSProcessHostResult completion) {
   NSURL *plugInsURL = [[NSBundle mainBundle] builtInPlugInsURL];
   NSArray<NSURL *> *contents = [[NSFileManager defaultManager]
       contentsOfDirectoryAtURL:plugInsURL
@@ -71,12 +80,12 @@ void MaciOSTestProcessHost(MaciOSProcessHostResult completion) {
   }
 
   NSString *dylibPath = [[[NSBundle mainBundle] privateFrameworksURL]
-      URLByAppendingPathComponent:@"TestPayload.framework/TestPayload"].path;
+      URLByAppendingPathComponent:frameworksRelativePath].path;
 
   NSExtensionItem *item = [NSExtensionItem new];
   item.userInfo = @{
     @"dylibPath" : dylibPath ?: @"",
-    @"entryPoint" : @"maciOS_test_entry",
+    @"entryPoint" : entryPoint,
   };
 
   [ext setRequestCancellationBlock:^(NSUUID *uuid, NSError *cancelError) {

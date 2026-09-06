@@ -56,9 +56,19 @@ arm64 Mach-O, platform-tagged for iOS, converted from `MH_EXECUTE` to
 
 ```sh
 python3 tools/macho_patch.py patch mytool -o mytool.ios --platform ios
-python3 tools/macho_patch.py dylibify mytool.ios -o mytool.dylib \
-    --install-name mytool.dylib --no-resign
+python3 tools/macho_patch.py dylibify mytool.ios -o p.dylib \
+    --install-name p.dylib --no-resign
+python3 tools/macho_patch.py symbols p.dylib --grep mytool_main --defined-only
 ```
+
+Keep the install name short -- **confirmed directly, not a style
+preference**: `LC_LOAD_DYLINKER` always names `/usr/lib/dyld` for any
+normally-linked executable, and `dylibify` repurposes that exact load
+command's space for the new `LC_ID_DYLIB`, so the name has to fit in
+whatever room that leaves (about 7-8 characters for a typical binary --
+`tools/macho_patch.py`'s own error tells you the real number if a longer
+name doesn't fit). It's an internal identifier, not something callers
+look up by, so a short one costs nothing.
 
 `--no-resign` on the `dylibify` step: whatever signs the final app bundle
 -- Xcode at build time (the normal case: add this file to a "Copy Files"
@@ -72,17 +82,28 @@ resign (the default) only for standalone inspection of the file.
 The dylib needs one exported C function matching `int name(void)` -- this
 is the CLI's ported entry point (the same shape as `port/CLICore`'s
 `clicore_run`, adjusted to return an int status instead of a string).
+Run `tools/macho_patch.py symbols` afterward (as above) to confirm it's
+still there, externally defined -- don't just assume a byte-level patch
+left the symbol table untouched.
 
-**The current on-device test doesn't use this pipeline yet.**
-`test-payload/TestPayload.c` is a real Xcode-built framework target
-(`project.yml`'s `TestPayload`, embedded in `MaciOSPortApp` alongside
-`ProcessHost`) exporting exactly one function, `maciOS_test_entry`,
-returning `42`. It exists to test `process-host/`'s mechanism in
-isolation -- does the extension trick really produce a separate process,
-does `dlopen`/`dlsym` really resolve something at
-`Frameworks/TestPayload.framework/TestPayload` -- before adding the
-separate variable of a *foreign*, macho_patch.py-patched binary's own
-dependencies (AUDIT.md section 5) into the same test.
+**Two payloads are wired into the app now, testing two different things:**
+
+- `test-payload/TestPayload.c` is a real Xcode-built framework target
+  (`project.yml`'s `TestPayload`), exporting `maciOS_test_entry` (returns
+  `42`). It's a **control**: compiled straight for iOS, never touching
+  this pipeline at all, so it isolates "does the extension trick itself
+  produce a separate process" from "does a foreign binary's own
+  compatibility work out." **Confirmed working on-device 2026-09-06.**
+- `test-payload/PatchedMacOSPayload.dylib` is `fixtures/macos_payload.c`
+  compiled for `arm64-apple-macos` (never iOS), then run through this
+  exact pipeline above by `test-payload/build-and-patch.sh` -- exporting
+  `maciOS_patched_payload_entry` (returns `99`). This is the actual M2
+  claim ("you don't need the source"), not yet confirmed on-device as of
+  this writing. `build-and-patch.sh` must run before `xcodegen generate`
+  (`project.yml` embeds its output via a Copy Files build phase), which
+  `.github/workflows/build.yml` does automatically.
+
+`ContentView.swift` has one "Test ProcessHost" button per payload.
 
 ## Invoking it from the host app
 

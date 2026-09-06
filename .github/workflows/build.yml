@@ -16,11 +16,18 @@ name: build
 #      time (AUDIT.md section 2), so an unsigned build is the correct
 #      input, not a placeholder.
 #
-# Neither build proves anything about on-device behavior, entitlements, or
-# whether process-host/'s extension-launch trick actually works -- a
-# compile success (simulator or device) doesn't exercise any of that. See
-# AUDIT.md and docs/xcode-setup.md / docs/process-host.md for what still
-# needs a real device plus SideStore.
+# Before either build, test-payload/build-and-patch.sh runs: compiles
+# fixtures/macos_payload.c for arm64-apple-macos (never iOS), patches it
+# with tools/macho_patch.py (platform tag + dylibify), and confirms its
+# entry point survived. project.yml embeds the result
+# (PatchedMacOSPayload.dylib) via a Copy Files build phase, so it has to
+# exist before `xcodegen generate` runs.
+#
+# Neither xcodebuild step proves anything about on-device behavior,
+# entitlements, or whether process-host/'s extension-launch trick actually
+# works -- a compile success (simulator or device) doesn't exercise any of
+# that. See AUDIT.md and docs/xcode-setup.md / docs/process-host.md for
+# what still needs a real device plus SideStore.
 
 on:
   push:
@@ -35,6 +42,9 @@ jobs:
 
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      - name: Build and patch the real macOS-binary test payload
+        run: ./test-payload/build-and-patch.sh
 
       - name: Generate Xcode project
         run: xcodegen generate

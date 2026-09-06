@@ -14,12 +14,12 @@ FIXTURES = ROOT / "fixtures"
 HAVE_TOOLCHAIN = shutil.which("clang") and (shutil.which("ld.lld") or shutil.which("ld64.lld"))
 
 
-def build_fixture(tmp_path):
-    out = tmp_path / "hello_macos_arm64"
+def build_fixture(tmp_path, source="hello.s", out_name="hello_macos_arm64"):
+    out = tmp_path / out_name
     subprocess.run(
         ["clang", "-target", "arm64-apple-macos11", "-fuse-ld=lld", "-nostdlib",
          "-Wl,-e,__start", "-Wl,-platform_version,macos,11.0,11.0",
-         str(FIXTURES / "hello.s"), "-o", str(out)],
+         str(FIXTURES / source), "-o", str(out)],
         check=True, capture_output=True,
     )
     return out
@@ -122,6 +122,46 @@ class TestAgainstRealBinary(unittest.TestCase):
                 expected = hash_func(bytes(data[start:end])).digest()[:digest_len]
                 actual = bytes(data[hash_off + slot * digest_len: hash_off + (slot + 1) * digest_len])
                 self.assertEqual(expected, actual, "hash mismatch at slot %d" % slot)
+
+
+@unittest.skipUnless(HAVE_TOOLCHAIN, "clang+lld not available to build a real Mach-O fixture")
+class TestFullPipelineAgainstRealPayload(unittest.TestCase):
+    """This is the actual end-to-end claim behind M2 (MILESTONES.md):
+    compile something for macOS (never for iOS), run it through the exact
+    patch + dylibify pipeline a real foreign binary would go through, and
+    confirm the entry point process-host/ needs to dlsym is still there,
+    externally defined, afterward. TestAgainstRealBinary above checks the
+    container (platform tag, filetype, signature); this checks the
+    payload itself survives."""
+
+    def setUp(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        self.binary = build_fixture(Path(d), source="macos_payload.c",
+                                     out_name="macos_payload_macos_arm64")
+
+    def test_entry_point_survives_patch_and_dylibify(self):
+        data = bytearray(self.binary.read_bytes())
+        header = mp.parse_header(data)
+        self.assertEqual(mp.PLATFORM_NAMES[mp.find_platform_command(data, header)["platform"]],
+                          "macos")
+
+        mp.patch_platform(data, header, "ios", min_os="15.0.0", sdk="15.0.0")
+        # Install name slot is tiny for any normally-linked executable
+        # (LC_LOAD_DYLINKER always names /usr/lib/dyld) -- "p.dylib" is
+        # deliberately short, same constraint hit preparing the real
+        # on-device test.
+        mp.dylibify(data, header, "p.dylib")
+        header = mp.parse_header(data)
+        self.assertEqual(header["filetype"], mp.MH_DYLIB)
+
+        symbols = {s["name"]: s for s in mp.list_symbols(data, header)}
+        entry = symbols.get("_maciOS_patched_payload_entry")
+        self.assertIsNotNone(entry, "entry point missing from symbol table after patching: %r" %
+                              sorted(symbols))
+        self.assertTrue(entry["external"], "entry point must be externally linked for dlsym()")
+        self.assertTrue(entry["defined"], "entry point must be defined, not just referenced")
 
 
 class TestSyntheticMachO(unittest.TestCase):

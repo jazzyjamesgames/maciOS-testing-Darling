@@ -28,6 +28,19 @@ targets:
     sources:
       - path: port/MaciOSPortApp
       - path: port/CLICore
+      # Pre-built by test-payload/build-and-patch.sh, which MUST run
+      # before `xcodegen generate` (see .github/workflows/build.yml) --
+      # this is the real M2 test artifact: a macOS-compiled binary,
+      # patched by tools/macho_patch.py, embedded here as a raw Copy
+      # Files target rather than compiled by Xcode from source at all
+      # (unlike TestPayload below, which Xcode compiles directly for iOS
+      # as a control). Xcode's own "Code Sign On Copy" (default for the
+      # Frameworks destination) covers its signature the same way it
+      # covers everything else in the bundle -- see AUDIT.md section 2.
+      - path: test-payload/PatchedMacOSPayload.dylib
+        buildPhase:
+          copyFiles:
+            destination: frameworks
     info:
       path: port/MaciOSPortApp/Info.plist
       properties:
@@ -59,7 +72,11 @@ targets:
     type: framework
     platform: iOS
     sources:
-      - path: test-payload
+      # Exactly this one file, not the whole test-payload/ directory --
+      # that directory also holds build-and-patch.sh and the *other*
+      # payload (PatchedMacOSPayload.dylib, embedded separately above),
+      # neither of which Xcode should try to compile as a source.
+      - path: test-payload/TestPayload.c
     info:
       path: test-payload/Info.plist
       properties:
