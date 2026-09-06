@@ -139,19 +139,23 @@ touching its source.
       once it's worth wiring in. If the reply channel doesn't pan out,
       whatever `ios18-probe` fell back to (Darwin notifications, since
       App Group files didn't survive SideStore's resign) is next to try.
-      **In progress**: `port/MaciOSPortApp/NSExtensionIntrospection.h`/`.m`
-      + "Introspect NSExtension"/"Introspect NSExtensionContext" buttons
-      dump the real classes' method surfaces via `class_copyMethodList`
-      instead of guessing at a wider completion-block signature — see
-      `docs/process-host.md`'s "Investigating the reply-channel question"
-      section. **`NSExtension`'s dump is confirmed on-device 2026-09-06:
-      no reply-payload accessor exists on that class** (only
-      `pidForRequestIdentifier:`), but it surfaced a real lead —
+      **In progress**: introspecting `NSExtension` and `NSExtensionContext`
+      (`port/MaciOSPortApp/NSExtensionIntrospection.h`/`.m`) found a real,
+      undocumented reply mechanism instead of the dead-end
+      `completeRequestReturningItems:` path — `NSExtension`'s dump
+      (confirmed on-device 2026-09-06) showed no accessor exposes that
+      payload at all, but surfaced
       `beginExtensionRequestWithInputItems:listenerEndpoint:completion:`
-      takes an `NSXPCListenerEndpoint`, a different (heavier) channel than
-      `completeRequestReturningItems:`. `NSExtensionContext`'s dump (how
-      `process-host/main.m` would retrieve that endpoint) is the next
-      piece, not yet read back.
+      (takes an `NSXPCListenerEndpoint`); `NSExtensionContext`'s dump
+      (also confirmed 2026-09-06) showed the matching private slot,
+      `_auxiliaryListener`/`_auxiliaryConnection`. This is now wired in for
+      real: `ProcessHostTester.m` builds an `NSXPCListener` and passes its
+      endpoint in; `process-host/main.m` retrieves it via
+      `_auxiliaryListener` and calls back over a shared protocol
+      (`process-host/MaciOSProcessHostReply.h`) — see
+      `docs/process-host.md`. **Not yet confirmed on-device**: built from
+      real introspected method names, not guessed, but the actual round
+      trip hasn't been proven to complete yet.
 - [ ] Once a real (non-trivial) macOS binary is the target, expect to
       spend most of the effort on dependency resolution: any macOS-only
       framework the binary links

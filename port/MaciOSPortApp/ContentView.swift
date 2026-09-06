@@ -87,13 +87,24 @@ struct ContentView: View {
 
     private func testProcessHost(frameworksRelativePath: String, entryPoint: String, label: String) {
         log.log("Test ProcessHost (\(label)) tapped: my pid is \(ProcessInfo.processInfo.processIdentifier)")
-        MaciOSTestProcessHost(frameworksRelativePath, entryPoint) { launched, pid, message in
+        // Positional, matching this C function's existing (CI-proven)
+        // unlabeled-parameter calling convention -- not trailing-closure
+        // sugar, since that requires a real argument label per parameter
+        // once there's more than one closure.
+        MaciOSTestProcessHost(frameworksRelativePath, entryPoint, { launched, pid, message in
             if launched {
                 log.log("ProcessHost (\(label)) LAUNCHED, reported pid=\(pid)")
             } else {
                 log.log("ProcessHost (\(label)) FAILED: \(message ?? "(no message)")")
             }
-        }
+        }, { received, exitCode, error in
+            // This is the actual reply-channel experiment: see
+            // docs/process-host.md. If this line never appears, the
+            // auxiliary-connection hypothesis didn't pan out for this run.
+            if received {
+                log.log("ProcessHost (\(label)) REPLY via auxiliary connection: exitCode=\(exitCode) error=\(error ?? "nil")")
+            }
+        })
     }
 }
 

@@ -28,6 +28,11 @@ targets:
     sources:
       - path: port/MaciOSPortApp
       - path: port/CLICore
+      # Shared with the ProcessHost target below (which picks it up via its
+      # own recursive `path: process-host` entry) -- one protocol
+      # definition, not two copies that could drift. See
+      # MaciOSProcessHostReply.h and docs/process-host.md.
+      - path: process-host/MaciOSProcessHostReply.h
       # Pre-built by test-payload/build-and-patch.sh, which MUST run
       # before `xcodegen generate` (see .github/workflows/build.yml) --
       # this is the real M2 test artifact: a macOS-compiled binary,

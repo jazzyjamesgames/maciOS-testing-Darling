@@ -125,25 +125,18 @@ before reading it:
   reads the real identifier back from the installed `.appex`'s own
   `Info.plist` under `Bundle.main.builtInPlugInsURL` rather than
   hardcoding the design-time string, for exactly this reason.
-- **This tests process-spawn, not the payload's exit code.** `main.m`'s
-  `ProcessHostHandler` replies via `completeRequestReturningItems:` with a
-  `pid`/`exitCode`/`error` payload, but whether that reply is actually
-  observable back on the caller's side through any proven mechanism is
-  still an open question -- neither this project's own testing nor the
-  prior art it draws on has confirmed it. `ProcessHostTester.m`
-  deliberately doesn't rely on it: it reports success only via
-  `pidForRequestIdentifier:` (a real, different PID) and failure via
-  `setRequestCancellationBlock:`, both confirmed working in `ios18-probe`'s
-  own on-device testing ("LAUNCHED as a real separate process... pid=%d").
-  That's a smaller, honestly-scoped claim -- "did a real separate process
-  come up at all" -- than "did the payload's exit code come back," and
-  it's the one to get answered first.
+- **`completeRequestReturningItems:` is not the reply path that's actually
+  used.** `main.m`'s `ProcessHostHandler` still fills in a
+  `pid`/`exitCode`/`error` payload and calls it, kept for completeness, but
+  per the investigation below there is no accessor on the host side that
+  can read it back at all. The real reply path is the auxiliary-connection
+  mechanism described next.
 
-## Investigating the reply-channel question
+## The reply-channel investigation, and the mechanism it found
 
-`ProcessHostTester.m`'s forward declaration of `NSExtension` only has the
-four methods LiveContainer and `ios18-probe` actually used to prove a
-process launches: `extensionWithIdentifier:error:`,
+`ProcessHostTester.m`'s original forward declaration of `NSExtension` only
+had the four methods LiveContainer and `ios18-probe` actually used to
+prove a process launches: `extensionWithIdentifier:error:`,
 `beginExtensionRequestWithInputItems:completion:`, `pidForRequestIdentifier:`,
 `setRequestCancellationBlock:`/`setRequestInterruptionBlock:`. None of
 those needed to observe `main.m`'s `completeRequestReturningItems:` reply
@@ -151,50 +144,65 @@ payload, because neither project asked "what did the extension hand
 back," only "did a separate process come up."
 
 Rather than guess at a wider block signature, `NSExtensionIntrospection.h`/`.m`
-asks the real, loaded `NSExtension` and `NSExtensionContext` classes what
+asked the real, loaded `NSExtension` and `NSExtensionContext` classes what
 their actual method surfaces are, using
 `class_copyMethodList`/`method_getTypeEncoding` -- the same "ask the
-runtime directly" technique `ios18-probe` used against CoreSimulator. Two
-buttons in `ContentView.swift` ("Introspect NSExtension" and "Introspect
-NSExtensionContext") dump every instance and class method, with its raw
-type encoding, to the in-app log.
+runtime directly" technique `ios18-probe` used against CoreSimulator (the
+"Introspect NSExtension"/"Introspect NSExtensionContext" buttons in
+`ContentView.swift` still dump this on demand).
 
-**`NSExtension`'s dump, confirmed on-device 2026-09-06: the answer is no,
-not through this class.** There is no `resultForRequestIdentifier:`,
+**`NSExtension`'s dump, confirmed on-device 2026-09-06: no, not through
+this class.** There is no `resultForRequestIdentifier:`,
 `outputItemsForRequestIdentifier:`, or any other accessor exposing
 `completeRequestReturningItems:`'s payload -- `pidForRequestIdentifier:`
-is the *only* per-request state `NSExtension` exposes after launch. So as
-currently written, `main.m`'s reply payload is unobservable from the host
-side; the caution in this doc and in `MaciOSPortApp`'s own code comments
-was warranted, not just theoretical.
+is the *only* per-request state `NSExtension` exposes after launch.
 
-**The dump did surface a real lead, though.** Two methods take an extra
+**The dump did surface a real lead:** two methods take an extra
 `NSXPCListenerEndpoint` argument the plain `...completion:` variants
-don't: `beginExtensionRequestWithInputItems:listenerEndpoint:completion:`
+don't -- `beginExtensionRequestWithInputItems:listenerEndpoint:completion:`
 and `beginExtensionRequestWithOptions:inputItems:listenerEndpoint:completion:`.
-That's the standard Apple shape for "the spawned side gets a live
-connection back to the caller": set up an `NSXPCListener` in the host app,
-hand its endpoint into the request via one of these two methods, and have
-`process-host/main.m` open an `NSXPCConnection` to it and call an exported
-protocol method directly with a real result -- a genuinely different
-channel from `completeRequestReturningItems:`, not a variation on it.
 
-The open part: *how* `main.m` gets that endpoint back out on the
-extension side is a question about `NSExtensionContext`, a different
-class than the one that revealed the lead -- hence the second
-introspection button, not yet read back as of this writing. Until that
-dump is read, treat the listener-endpoint approach as a promising
-direction, not a confirmed mechanism.
+**`NSExtensionContext`'s dump, confirmed on-device 2026-09-06, closed the
+loop:** `_auxiliaryListener`/`_setAuxiliaryListener:` and
+`_auxiliaryConnection`/`_setAuxiliaryConnection:` are real methods on that
+class, and line up with `initWithInputItems:listenerEndpoint:contextUUID:`
+-- the constructor `NSExtension` must use internally when a request is
+made with a listener endpoint. That's the matching private slot on the
+extension side for whatever endpoint the host passed in.
 
-If neither `NSExtensionContext` nor further work on the listener-endpoint
-idea pans out, whatever `ios18-probe` fell back to (Darwin notifications,
-since App Group files didn't survive SideStore's resign) is next to try.
+**This is now wired in as the actual reply channel, not just a
+hypothesis:**
+
+- `port/MaciOSPortApp/ProcessHostTester.m` builds an anonymous
+  `NSXPCListener`, sets its delegate to a small
+  `MaciOSProcessHostReplyReceiver` (`<NSXPCListenerDelegate,
+  MaciOSProcessHostReply>`), and hands `listener.endpoint` into
+  `beginExtensionRequestWithInputItems:listenerEndpoint:completion:`. The
+  receiver is kept alive past the function's return via
+  `objc_setAssociatedObject` on the `NSExtension` instance (which already
+  outlives the call through its own captured blocks).
+- `process-host/main.m` retrieves `context._auxiliaryListener` (declared
+  via a private category, guarded with `respondsToSelector:`), opens an
+  `NSXPCConnection` to it, and calls
+  `processHostDidFinishWithPID:exitCode:error:` on the proxy -- a protocol
+  (`process-host/MaciOSProcessHostReply.h`) shared by both targets via a
+  single header referenced from both `project.yml` entries, not two
+  copies that could drift.
+- `ContentView.swift`'s two "Test ProcessHost" buttons now log a second
+  line, `... REPLY via auxiliary connection: exitCode=... error=...`, if
+  and when it arrives -- separately from and after the existing `LAUNCHED`
+  line. If that line never appears, the hypothesis didn't pan out and
+  whatever `ios18-probe` fell back to (Darwin notifications, since App
+  Group files didn't survive SideStore's resign) is next to try. **Not yet
+  confirmed on-device as of this writing** -- the mechanism is built from
+  real, dumped method names rather than guessed, but nothing has proven
+  the actual round trip completes yet.
 
 ## Known limitations (carried over from ios18-probe's findings, or found here)
 
-- **The exit-code/error reply path is unverified**, per above -- treat
-  `main.m`'s reply payload as best-effort until something confirms the
-  caller can actually read it back.
+- **The auxiliary-connection reply path is unconfirmed on-device.** Built
+  from real introspected method names, not guessed, but not yet proven to
+  actually deliver a message end to end -- see above.
 - **One call per process instance, for now.** Each extension request gets
   a fresh process; there's no persistent "keep it running and call it
   again" path implemented here yet.
