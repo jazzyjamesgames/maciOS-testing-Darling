@@ -20,6 +20,12 @@ import SwiftUI
 // See ProcessHostTester.m for exactly what either test does and doesn't
 // verify.
 //
+// "Run SQLite3 (M3)": M3's real target, per MILESTONES.md -- SQLite's own
+// amalgamation (third_party/sqlite/), recompiled for iOS via path A (the
+// same approach as CLICore's clicore_run() above, but genuinely
+// non-trivial). See port/SQLiteCLI/sqlite_cli.h. Not yet confirmed
+// on-device as of this writing.
+//
 // The log view + copy button exist so a real on-device run produces
 // something that can actually be debugged: see DebugLog.swift for why the
 // pasteboard, not a shared file, is the channel used.
@@ -75,6 +81,19 @@ struct ContentView: View {
                 MaciOSSniffDarwinNotifications { line in
                     log.log(line)
                 }
+            }
+            .buttonStyle(.bordered)
+
+            Button("Run SQLite3 (M3)") {
+                // M3's real target: SQLite's own amalgamation, recompiled
+                // for iOS via path A -- see third_party/sqlite/README.md
+                // and port/SQLiteCLI/sqlite_cli.h.
+                var buffer = [CChar](repeating: 0, count: 256)
+                let rc = buffer.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                    sqliteCLI_run(ptr.baseAddress, Int32(ptr.count))
+                }
+                let resultString = String(cString: buffer)
+                log.log("SQLite3 CLI (rc=\(rc)): \(resultString)")
             }
             .buttonStyle(.bordered)
 

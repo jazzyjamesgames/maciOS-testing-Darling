@@ -28,6 +28,13 @@ targets:
     sources:
       - path: port/MaciOSPortApp
       - path: port/CLICore
+      # M3's real target (MILESTONES.md): SQLite's own amalgamation,
+      # recompiled for iOS via path A, same as CLICore above but genuinely
+      # non-trivial. See third_party/sqlite/README.md and
+      # port/SQLiteCLI/sqlite_cli.h.
+      - path: port/SQLiteCLI
+      - path: third_party/sqlite/sqlite3.c
+      - path: third_party/sqlite/sqlite3.h
       # Shared with the ProcessHost target below (which picks these up via
       # its own recursive `path: process-host` entry) -- one implementation
       # of the reply-channel naming convention, not two copies that could

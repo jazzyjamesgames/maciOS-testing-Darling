@@ -228,6 +228,38 @@ regardless of which launch mechanism got you running in the first place),
 and any hardcoded macOS filesystem paths (`/tmp`, `/usr/...`) redirected to
 the app's own sandbox container.
 
+**Target picked: SQLite** — literally what macOS itself ships as
+`/usr/bin/sqlite3` and `/usr/lib/libsqlite3.dylib`, genuinely non-trivial
+(a full SQL engine, not a toy), and a clean fit for path A: its official
+amalgamation (`third_party/sqlite/`, public domain, vendored unmodified —
+see the README there) needs nothing beyond the C standard library and
+pthreads by default, all present on iOS, so this target doesn't exercise
+`tools/macho_patch.py`'s dependency-redirection work at all. That's
+expected, not a gap in the choice — a future target with real
+macOS-framework dependencies is what that tooling is for; this milestone
+is about proving a real, substantial piece of macOS software runs, first.
+
+- [x] `port/SQLiteCLI/sqlite_cli.h`/`.c` — drives `third_party/sqlite/sqlite3.c`'s
+      public C API directly (not `shell.c`'s interactive REPL, which
+      assumes a real terminal that doesn't exist in a sandboxed iOS app —
+      see the README): opens an in-memory database (`:memory:`, sidestepping
+      sandbox-path questions for this first win), creates a table, inserts
+      three rows, runs an aggregate query, and returns a human-readable
+      summary string plus a status code — the same `int name(void)`-shaped
+      contract `process-host/` already uses for M2 payloads.
+- [x] `project.yml`: `third_party/sqlite/sqlite3.c`/`.h` and
+      `port/SQLiteCLI/` added directly to `MaciOSPortApp`'s sources (path
+      A — compiled straight into the app, same as `port/CLICore`, no
+      separate process/framework needed). A "Run SQLite3 (M3)" button in
+      `ContentView.swift` logs the result.
+- [ ] **Not yet confirmed on-device.** Couldn't be locally smoke-tested in
+      this sandbox at all (unlike `port/CLICore`'s trivial stub): `clang
+      -target arm64-apple-ios15.0 -c` on `sqlite3.c` hits a glibc-internal
+      header conflict (`bits/libc-header-start.h`) with no real Darwin SDK
+      present, since SQLite genuinely needs the C standard library, unlike
+      a `-nostdlib` fixture. The real macOS CI runner (with the actual
+      iOS SDK) is the first real compile check this gets.
+
 ## M4 — GUI application (flagged, likely out of scope as "minimum")
 
 A macOS GUI app's *logic* can be ported the same way as M3, but its *UI

@@ -2,3 +2,4 @@
 #import "ProcessHostTester.h"
 #import "NSExtensionIntrospection.h"
 #import "DarwinNotificationSniffer.h"
+#import "sqlite_cli.h"
