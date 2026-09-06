@@ -2,10 +2,11 @@
 
 Context: no jailbreak. `AUDIT.md` documents two mechanisms that make native
 ARM64 execution on this iPhone possible anyway: a real developer signing
-identity applied to the whole app bundle at install time (SideStore/AltStore,
-section 2), and a declared app extension standing in for `posix_spawn`
-(section 3, `process-host/`). Every milestone below builds on one or both.
-Native ARM64 throughout — no VM, no CPU emulator, no instruction translation.
+identity applied to the whole app bundle — by Xcode at build time for both
+milestones below, no other tool required (section 2) — and a declared app
+extension standing in for `posix_spawn` (section 3, `process-host/`). Every
+milestone below builds on one or both. Native ARM64 throughout — no VM, no
+CPU emulator, no instruction translation.
 
 ## M1 — Trivial CLI, source-ported (in progress)
 
@@ -60,9 +61,13 @@ touching its source.
       CLI binary — or reuse `fixtures/hello.s`'s pattern, adapted to
       export a named `int name(void)` entry point instead of calling
       `exit()` directly, as the concrete first test subject. Patch it
-      (`patch --platform ios`, then `dylibify`), drop the result into an
-      app's `Frameworks/`, add `process-host/` as an extension target,
-      install via SideStore, and invoke it per `docs/process-host.md`.
+      (`patch --platform ios`, then `dylibify --no-resign`), add it to the
+      Xcode project as a "Copy Files" build phase input targeting
+      `Frameworks/` so Xcode signs it along with everything else when you
+      build, add `process-host/` as an extension target, run from Xcode,
+      and invoke it per `docs/process-host.md`. (No SideStore needed here
+      — that only matters if the payload were being fetched/patched after
+      the app is already installed, which this milestone doesn't do.)
 - [ ] Expect to spend most of the effort on dependency resolution once a
       real tool is the target: any macOS-only framework the binary links
       against needs either a redirect to iOS's real equivalent (if one

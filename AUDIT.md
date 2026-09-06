@@ -31,7 +31,7 @@ run at all:
 |---|---|---|
 | Code signing enforcement | Advisory outside the App Store/Gatekeeper path; ad-hoc/unsigned arm64 code can run from a shell | Mandatory, in-kernel (AMFI), for every executable page, no exceptions on stock firmware |
 | Process launch surface | Any shell can `exec()` any signed-enough binary | No general-purpose shell with `exec` rights; a new process comes only from an installed app bundle **or** a declared app extension (see section 4) |
-| Trust roots accepted | Apple root, plus locally-generated self-signed/ad-hoc identities | Apple root (App Store/TestFlight/enterprise), or a developer certificate + matching provisioning profile (Xcode/AltStore/SideStore) — **ad-hoc/identity-less signatures don't satisfy library validation** (section 2) |
+| Trust roots accepted | Apple root, plus locally-generated self-signed/ad-hoc identities | Apple root (App Store/TestFlight/enterprise), or a developer certificate + matching provisioning profile — applied by Xcode at build time, or by AltStore/SideStore at install time for content that didn't exist at build time (section 2) — **ad-hoc/identity-less signatures don't satisfy library validation** |
 | Sandbox | Opt-in (`sandbox-exec`), most CLI tools run unsandboxed | Mandatory per-app container sandbox, entitlement-gated |
 | Frameworks available | Full AppKit/Cocoa/Cocoa Touch split; macOS-only frameworks | iOS's dyld shared cache contains no AppKit; UIKit only |
 | W^X / JIT | Default deny; various opt-outs exist | Default deny; JIT needs a specific entitlement or a debugger attach, granted only to processes iOS already trusts |
@@ -79,28 +79,50 @@ presence.
 
 ### The fix: apply a real signing identity to the whole bundle
 
-Sideloading tools built around a real Apple Developer identity — SideStore
-and AltStore are the concrete examples found — **re-sign every embedded
-binary in the app bundle with the developer's own team certificate at
-install time**. That includes binaries you didn't originally compile
-yourself: drop a byte-patched, platform-flipped, dylib-ified Mach-O into
-`Frameworks/` inside the app bundle (unsigned, or with a throwaway ad-hoc
-signature — it gets discarded), and the same install-time resign that
-covers your own app binary covers it too. Every embedded binary ends up
-sharing one real, trusted signing identity, which is exactly what library
-validation checks for.
+Two different tools do this, for two different situations — worth being
+precise about which one this project actually needs, since an earlier
+version of this document over-pointed at the wrong one:
 
-This has been used, concretely, to get **Apple's own iOS Simulator runtime
-code** (`CoreSimulator.framework`, extracted from the DMG Xcode normally
-ships it in, byte-patched the same way `tools/macho_patch.py` patches
-files here) loaded and genuinely executing — real `SimServiceContext`,
-`SimDeviceType`, `SimRuntime`, and `SimDevice` objects instantiated and
-driven through their actual Objective-C API — inside a SideStore-signed
-app on a physical, non-jailbroken iPhone. That's strong evidence this
-mechanism works in practice, not just in theory: if it gets Apple's own
-simulator runtime loaded, it gets a patched macOS CLI binary loaded too,
-under the same constraint (its dependencies have to resolve on iOS —
-section 5).
+- **Xcode itself**, if the binary is available *before* you build — patch
+  it with `tools/macho_patch.py`, add it to the Xcode project as a "Copy
+  Files" build phase targeting `Frameworks/` (or as an embedded app
+  extension, `process-host/`'s case). Xcode's own build system re-signs
+  every embedded item — frameworks, app extensions, anything copied into
+  `Frameworks/` — with the project's own signing identity as a completely
+  standard, automatic part of building. This is not a workaround; it's
+  what Xcode always does for embedded content, and it's sufficient on its
+  own, with nothing else installed, for both M1 and M2 as currently
+  scoped in this repo (the payload is patched *before* the build, so it's
+  just another file in the project by the time Xcode signs anything).
+- **SideStore/AltStore**, if the binary only exists *after* the app is
+  already installed — these sideloading tools **re-sign every embedded
+  binary in the app bundle with the developer's own team certificate at
+  install time**, which is the mechanism to reach for when new content
+  can't be embedded at Xcode build time at all. This project's own prior
+  art for the whole approach (`ios18-probe`) needed exactly this: it
+  fetches a 16GB simulator runtime over the network *after* install and
+  patches parts of it then, so there was no "build time" at which Xcode
+  could have signed it. Not a requirement for M1/M2 here today, but the
+  right tool once a milestone wants runtime-fetched, runtime-patched
+  content rather than something prepared before the build.
+
+Either way, the binaries in the bundle end up sharing one real, trusted
+signing identity, which is exactly what library validation checks for —
+whether that identity got applied by Xcode at build time or by SideStore
+at install time doesn't matter to the kernel.
+
+The `ios18-probe` prior art demonstrates the *patching* half of this
+concretely: **Apple's own iOS Simulator runtime code**
+(`CoreSimulator.framework`, extracted from the DMG Xcode normally ships it
+in, byte-patched the same way `tools/macho_patch.py` patches files here)
+loaded and genuinely executing — real `SimServiceContext`, `SimDeviceType`,
+`SimRuntime`, and `SimDevice` objects instantiated and driven through
+their actual Objective-C API — inside a SideStore-signed app on a
+physical, non-jailbroken iPhone (SideStore, there, because the runtime is
+fetched post-install). That's strong evidence the underlying mechanism
+(a shared, real signing identity satisfies library validation for
+byte-patched content) works in practice, not just in theory — and it
+applies the same way whether the identity comes from Xcode or SideStore.
 
 **What this doesn't unlock:** a real, trusted signing identity is a
 requirement most patched Mach-O binaries didn't have a way to satisfy
@@ -169,22 +191,26 @@ USB/Wi-Fi. This is `port/` + `docs/xcode-setup.md` (M1).
 
 **Path B — patch an existing compiled binary.** You have a compiled
 `arm64-apple-macos` binary but not necessarily its source. Patch its
-platform tag, convert it to a dylib (`tools/macho_patch.py`), bundle it
-into an app's `Frameworks/`, and let SideStore's install-time resign make
-it loadable — either `dlopen`'d directly into the host app's own process,
-or run as its own process via `process-host/` (section 3). This needs no
-recompile, but is bounded by whether the binary's dependencies resolve on
-iOS at all (section 5) — this is `MILESTONES.md`'s M2.
+platform tag, convert it to a dylib (`tools/macho_patch.py`), add it to
+the Xcode project as a build-phase input targeting `Frameworks/` so
+Xcode's own automatic signing covers it — either `dlopen`'d directly into
+the host app's own process, or run as its own process via `process-host/`
+(section 3). This needs no recompile, but is bounded by whether the
+binary's dependencies resolve on iOS at all (section 5) — this is
+`MILESTONES.md`'s M2. (SideStore only enters the picture if the payload
+needs to be fetched or patched *after* install, per section 2 — not
+needed for M2 as currently scoped.)
 
 ### Build requirement this session cannot satisfy directly
 
 Building and signing an actual installable `.app`, and running it on a
 physical iPhone, requires **Xcode on a Mac** (for the iOS SDK, code
-signing/provisioning, and the USB/Wi-Fi device-install pipeline) plus
-SideStore or AltStore set up against the target device for path B's
-install-time resign. This sandbox is Linux with a stock `clang`/`lld` and
-no Apple toolchain beyond that (no iOS SDK, no `xcrun`, no Swift compiler,
-no `codesign`). Concretely:
+signing/provisioning, and the USB/Wi-Fi device-install pipeline) — that's
+the only tool required for M1 and M2 as currently scoped; a free Apple ID
+("personal team" automatic signing) is enough, no paid Developer Program
+and no SideStore/AltStore needed. This sandbox is Linux with a stock
+`clang`/`lld` and no Apple toolchain beyond that (no iOS SDK, no `xcrun`,
+no Swift compiler, no `codesign`). Concretely:
 
 - I *can*, and did, validate that portable C source compiles cleanly to an
   arm64 object file under `-target arm64-apple-ios15.0` here, and that
@@ -208,7 +234,8 @@ included) — something nothing in this repo had been checked against
 before. It does **not** confirm anything about on-device behavior,
 entitlements, or whether `process-host/`'s extension-launch trick actually
 gets a separate PID: a simulator build doesn't exercise any of that, and
-still needs your Mac + iPhone + SideStore, per the sections above.
+still needs your Mac + iPhone (Xcode alone — see above), per the sections
+above.
 
 ## 5. iOS restrictions inventory (for reference)
 

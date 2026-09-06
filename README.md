@@ -16,24 +16,29 @@ Two walls, two non-jailbreak fixes, both documented in `AUDIT.md` with the
 prior art they're drawn from:
 
 1. **Code signing / library validation** — a byte-patched Mach-O needs a
-   real signing identity applied to the *whole* app bundle at install
-   time (SideStore/AltStore do this), not just a hash-consistent ad-hoc
-   signature. `tools/macho_patch.py` produces the patched binary; the
-   bundle + install step is where the identity gets applied.
+   real signing identity applied to the *whole* app bundle, not just a
+   hash-consistent ad-hoc signature. **Xcode's own automatic signing does
+   this already** for anything embedded before you build — no other tool
+   needed for M1/M2 as currently scoped. SideStore/AltStore do the same
+   thing at *install* time instead, only actually necessary for content
+   fetched/patched *after* the app is already installed (not this repo's
+   current milestones — see `AUDIT.md` section 2).
 2. **No `posix_spawn`** — a sandboxed app can't spawn a new process, but
    it can ask iOS's own app-extension launch machinery to create one
    (LiveContainer's trick, adapted in `process-host/`).
 
-That opens two paths, both 100% native ARM64:
+That opens two paths, both 100% native ARM64, both installable with
+**just Xcode and a free Apple ID** (no SideStore, no paid Developer
+Program):
 
 - [`port/`](port/) — **M1**, path A: you have the source. Recompile for
   `arm64-apple-ios`, host in a minimal signed app, install via Xcode.
   See [`docs/xcode-setup.md`](docs/xcode-setup.md).
 - [`process-host/`](process-host/) — **M2**, path B: you have a compiled
   binary, not necessarily its source. Patch it
-  (`tools/macho_patch.py patch` + `dylibify`), bundle it, run it as a real
-  separate process via this extension. See
-  [`docs/process-host.md`](docs/process-host.md).
+  (`tools/macho_patch.py patch` + `dylibify`), add it to the Xcode project
+  so Xcode signs it along with everything else, run it as a real separate
+  process via this extension. See [`docs/process-host.md`](docs/process-host.md).
 
 - [`AUDIT.md`](AUDIT.md) — the full technical audit.
 - [`MILESTONES.md`](MILESTONES.md) — the milestone plan.
@@ -55,10 +60,14 @@ python3 -m unittest discover -s tests
 from [`project.yml`](project.yml) via
 [XcodeGen](https://github.com/yonaskolb/XcodeGen)) on every push: a fast
 iOS Simulator compile check, then a real-device build producing an
-**unsigned `.ipa`** uploaded as a workflow artifact — the correct input
-for SideStore/AltStore to sign at install (they resign an unsigned IPA
-themselves; see `AUDIT.md` section 2). Neither build confirms on-device
-behavior; see `AUDIT.md`'s note at the end of section 4.
+**unsigned `.ipa`** uploaded as a workflow artifact. Note this artifact is
+a *different* install path than "open the project in Xcode and press
+Run": since it's already built with signing disabled, installing it
+without opening Xcode at all needs a resigning tool (SideStore/AltStore,
+which resign an unsigned IPA at install time — see `AUDIT.md` section 2).
+If you have Xcode, running directly from it (`docs/xcode-setup.md`) is
+simpler and needs nothing else installed. Neither CI build confirms
+on-device behavior; see `AUDIT.md`'s note at the end of section 4.
 
 **[`docs/getting-logs.md`](docs/getting-logs.md)** — every channel that
 actually exists for getting a real log back into this chat (CI, Xcode's

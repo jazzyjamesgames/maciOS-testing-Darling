@@ -60,11 +60,14 @@ python3 tools/macho_patch.py dylibify mytool.ios -o mytool.dylib \
     --install-name mytool.dylib --no-resign
 ```
 
-`--no-resign` on the `dylibify` step, if this dylib is going into an app
-bundle that SideStore will resign at install time (see `AUDIT.md` section 2)
--- SideStore's own signature replaces whatever's there anyway, so signing
-it here would be wasted work. Keep the ad-hoc resign (the default) only for
-standalone inspection of the file.
+`--no-resign` on the `dylibify` step: whatever signs the final app bundle
+-- Xcode at build time (the normal case: add this file to a "Copy Files"
+build phase targeting `Frameworks/`, and Xcode's own automatic signing
+covers it, no other tool needed) or SideStore at install time (only if
+this dylib is being fetched/patched *after* the app is already installed
+-- see `AUDIT.md` section 2) -- replaces whatever signature is here
+already, so signing it in this step would be wasted work. Keep the ad-hoc
+resign (the default) only for standalone inspection of the file.
 
 The dylib needs one exported C function matching `int name(void)` -- this
 is the CLI's ported entry point (the same shape as `port/CLICore`'s
