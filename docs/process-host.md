@@ -126,13 +126,14 @@ before reading it:
   `Info.plist` under `Bundle.main.builtInPlugInsURL` rather than
   hardcoding the design-time string, for exactly this reason.
 - **This tests process-spawn, not the payload's exit code.** `main.m`'s
-  `ProcessHostHandler` replies via `completeRequestReturningItems:` with a
-  `pid`/`exitCode`/`error` payload, but that reply is not observable from
-  the host side by any mechanism found so far -- see the investigation
-  below, including one real attempt at a workaround that was tried
-  on-device and ruled out, not just left unconfirmed.
+  `ProcessHostHandler` still replies via `completeRequestReturningItems:`
+  with a `pid`/`exitCode`/`error` payload, but that specific reply is not
+  observable from the host side by any mechanism found so far. A separate,
+  independent channel -- Darwin notifications -- is what `ContentView.swift`'s
+  two "Test ProcessHost" buttons actually rely on now, per the
+  investigation below.
 
-## The reply-channel investigation (a real lead, tried, and ruled out)
+## The reply-channel investigation (two dead ends, then real public API)
 
 `ProcessHostTester.m`'s original forward declaration of `NSExtension` only
 had the four methods LiveContainer and `ios18-probe` actually used to
@@ -198,20 +199,61 @@ The two things that got ruled out, plainly:
    listenerEndpoint:completion:` -- rejected outright by this extension
    point before a process is even launched (confirmed on-device).
 
-Untried and worth trying next: `beginExtensionRequestWithOptions:inputItems:
-listenerEndpoint:completion:` (the sibling overload with an explicit
-`options:` dictionary -- maybe the plain 3-arg form is simply incomplete
-without one, though this is a guess, not a finding); and Darwin
-notifications, per `ios18-probe`'s own fallback (App Group files didn't
-survive SideStore's resign there either).
+Still untried, if this one doesn't pan out either:
+`beginExtensionRequestWithOptions:inputItems:listenerEndpoint:completion:`
+(the sibling overload with an explicit `options:` dictionary -- maybe the
+plain 3-arg form is simply incomplete without one, though this is a guess,
+not a finding).
+
+## The third attempt: Darwin notifications (real, public, documented API)
+
+Both attempts above are private, undocumented API -- exactly the kind of
+thing that can silently stop working across an OS update, or (as it turned
+out) simply not behave the way its name and argument shape suggest. Darwin
+notifications (`CFNotificationCenterGetDarwinNotifyCenter()`) are the
+opposite: real, public, documented Apple API, the same mechanism many
+ordinary App Store apps use for app-extension signaling, and specifically
+`ios18-probe`'s own fallback once it found App Group files don't survive
+SideStore's resign (so a shared-file-based channel was out for the same
+reason it would be here).
+
+The catch: Darwin notifications carry no payload of their own -- there is
+no `userInfo` dictionary, unlike the *local* notification center. The
+mechanism this project uses instead (`process-host/MaciOSProcessHostDarwinReply.h`/`.m`,
+shared by both `ProcessHostTester.m` and `main.m` via one implementation,
+not two copies that could drift) encodes the exit code/error directly into
+the notification's own *name*:
+
+- The host (`ProcessHostTester.m`) generates its own `requestUUID` (not the
+  system's own opaque per-launch identifier from
+  `beginExtensionRequestWithInputItems:completion:`, since that's only
+  known once the process has *launched*, and the request needs a
+  correlation ID before that), registers a Darwin notification observer
+  for *every* notification system-wide (there's no way to filter
+  server-side on a name that encodes an unknown payload), and filters by
+  the `requestUUID` prefix itself in the callback.
+- `process-host/main.m` posts `dev.local.maciOS.processhost.reply.<uuid>.ok.<exitcode>`
+  on success or `...err.<percent-encoded, alphanumeric-only, 200-char-capped>`
+  on failure, right before (and independent of) its existing
+  `completeRequestReturningItems:` call.
+- `ContentView.swift`'s two "Test ProcessHost" buttons log a `REPLY:
+  exitCode=... error=...` line if and when this arrives.
+
+**Not yet confirmed on-device as of this writing.** This is real public
+API rather than a guess at private internals, which is a meaningfully
+different confidence level than the first two attempts -- but "the API is
+documented" isn't the same claim as "the round trip actually completes on
+this device, through this specific extension point, in this specific
+sandbox configuration." That still needs the same on-device test the first
+two attempts got.
 
 ## Known limitations (carried over from ios18-probe's findings, or found here)
 
-- **The exit-code/error reply path has no known working mechanism.** Both
+- **The exit-code/error reply path's status: two mechanisms ruled out,
+  one (Darwin notifications) built and awaiting on-device confirmation.**
   `completeRequestReturningItems:` and the auxiliary-connection
-  listener-endpoint approach were tried; neither works, per above. Treat
-  `main.m`'s `completeRequestReturningItems:` payload as write-only until
-  something new is found.
+  listener-endpoint approach don't work, per above; treat `main.m`'s
+  `completeRequestReturningItems:` payload specifically as write-only.
 - **One call per process instance, for now.** Each extension request gets
   a fresh process; there's no persistent "keep it running and call it
   again" path implemented here yet.

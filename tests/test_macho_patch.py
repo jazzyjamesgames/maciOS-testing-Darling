@@ -211,5 +211,179 @@ class TestSyntheticMachO(unittest.TestCase):
             mp.parse_header(data)
 
 
+class TestDependencyResolution(unittest.TestCase):
+    """M3's actual first question (MILESTONES.md): what does a real macOS
+    binary link against, and which of those exist on iOS? Uses a hand-built
+    Mach-O (like TestSyntheticMachO) rather than a real compiled one --
+    this repo's Linux sandbox has no way to link against a real framework
+    at all (no macOS SDK), which is exactly why classify_dependency's
+    ios_sdk_path-verified path can only be exercised on the real macOS CI
+    runner, not here."""
+
+    def _build_macho_with_dependency(self, path=b"/System/Library/Frameworks/Foundation.framework/Foundation",
+                                      current_version="1.0.0", compat_version="1.0.0",
+                                      kind_cmd=None):
+        platform, minos, sdk, ntools = 1, 0x0B0000, 0x0B0000, 0
+        build_version = struct.pack("<IIIIII", mp.LC_BUILD_VERSION, 24,
+                                     platform, minos, sdk, ntools)
+
+        name = path + b"\x00"
+        header_size = 24  # cmd, cmdsize, name_offset, timestamp, current, compat
+        raw_size = header_size + len(name)
+        padded_size = (raw_size + 7) // 8 * 8
+        dylib_cmd = struct.pack("<IIIIII", kind_cmd or mp.LC_LOAD_DYLIB, padded_size,
+                                 header_size, 0, mp.encode_version(current_version),
+                                 mp.encode_version(compat_version))
+        dylib_cmd += name
+        dylib_cmd += b"\x00" * (padded_size - len(dylib_cmd))
+
+        ncmds = 2
+        sizeofcmds = len(build_version) + len(dylib_cmd)
+        header = struct.pack("<IiiIIIII", mp.MH_MAGIC_64, mp.CPU_TYPE_ARM64, 0,
+                              2, ncmds, sizeofcmds, 0, 0)
+        return bytearray(header + build_version + dylib_cmd)
+
+    def test_list_dylib_dependencies_parses_load_dylib(self):
+        data = self._build_macho_with_dependency()
+        header = mp.parse_header(data)
+        deps = list(mp.list_dylib_dependencies(data, header))
+        self.assertEqual(len(deps), 1)
+        dep = deps[0]
+        self.assertEqual(dep["kind"], "required")
+        self.assertEqual(dep["path"], "/System/Library/Frameworks/Foundation.framework/Foundation")
+        self.assertEqual(dep["current_version"], "1.0.0")
+        self.assertEqual(dep["compatibility_version"], "1.0.0")
+
+    def test_list_dylib_dependencies_recognizes_weak_and_reexport(self):
+        for kind_cmd, expected_kind in ((mp.LC_LOAD_WEAK_DYLIB, "weak"),
+                                         (mp.LC_REEXPORT_DYLIB, "reexport"),
+                                         (mp.LC_LOAD_UPWARD_DYLIB, "upward")):
+            data = self._build_macho_with_dependency(kind_cmd=kind_cmd)
+            header = mp.parse_header(data)
+            deps = list(mp.list_dylib_dependencies(data, header))
+            self.assertEqual(deps[0]["kind"], expected_kind)
+
+    def test_redirect_dylib_dependency_rewrites_path_in_place(self):
+        data = self._build_macho_with_dependency(
+            path=b"/System/Library/Frameworks/AppKit.framework/AppKit")
+        header = mp.parse_header(data)
+        original_len = len(data)
+        match = mp.redirect_dylib_dependency(
+            data, header,
+            "/System/Library/Frameworks/AppKit.framework/AppKit",
+            "/S/L/F/UIKit.framework/UIKit")
+        self.assertEqual(match["kind"], "required")
+        self.assertEqual(len(data), original_len)
+        deps = list(mp.list_dylib_dependencies(data, header))
+        self.assertEqual(deps[0]["path"], "/S/L/F/UIKit.framework/UIKit")
+
+    def test_redirect_dylib_dependency_rejects_path_too_long(self):
+        data = self._build_macho_with_dependency(path=b"/a")
+        header = mp.parse_header(data)
+        with self.assertRaises(mp.MachOError):
+            mp.redirect_dylib_dependency(
+                data, header, "/a",
+                "/a-considerably-longer-replacement-path-that-does-not-fit-in-the-slot")
+
+    def test_redirect_dylib_dependency_rejects_unknown_path(self):
+        data = self._build_macho_with_dependency()
+        header = mp.parse_header(data)
+        with self.assertRaises(mp.MachOError):
+            mp.redirect_dylib_dependency(data, header, "/nonexistent", "/replacement")
+
+    def test_classify_dependency_uses_built_in_table_without_sdk_path(self):
+        status, _ = mp.classify_dependency(
+            "/System/Library/Frameworks/Foundation.framework/Foundation")
+        self.assertEqual(status, "available")
+        status, _ = mp.classify_dependency(
+            "/System/Library/Frameworks/AppKit.framework/AppKit")
+        self.assertEqual(status, "unavailable")
+        status, _ = mp.classify_dependency(
+            "/System/Library/Frameworks/TotallyMadeUp.framework/TotallyMadeUp")
+        self.assertEqual(status, "unknown")
+
+    def test_classify_dependency_prefers_sdk_path_when_given(self):
+        sdk_dir = Path(self._get_tmp_dir())
+        fw_dir = sdk_dir / "System/Library/Frameworks/Foundation.framework"
+        fw_dir.mkdir(parents=True)
+        (fw_dir / "Foundation").write_bytes(b"")
+        status, detail = mp.classify_dependency(
+            "/System/Library/Frameworks/Foundation.framework/Foundation", str(sdk_dir))
+        self.assertEqual(status, "available")
+        self.assertIn(str(sdk_dir), detail)
+
+        status, _ = mp.classify_dependency(
+            "/System/Library/Frameworks/NotThere.framework/NotThere", str(sdk_dir))
+        self.assertEqual(status, "unavailable")
+
+    def _get_tmp_dir(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def _build_macho_with_symbols_and_deps(self):
+        """Two dependencies (Foundation ordinal 1, AppKit ordinal 2) plus a
+        symbol table with one undefined symbol pointing at each (via
+        n_desc's library ordinal) and one locally defined symbol -- enough
+        to test undefined_symbols_by_dependency actually correlates a
+        symbol back to the dependency it came from, not just the raw
+        symbol/dependency lists in isolation."""
+        platform, minos, sdk, ntools = 1, 0x0B0000, 0x0B0000, 0
+        build_version = struct.pack("<IIIIII", mp.LC_BUILD_VERSION, 24,
+                                     platform, minos, sdk, ntools)
+
+        def dylib_cmd(path):
+            name = path + b"\x00"
+            header_size = 24
+            padded_size = (header_size + len(name) + 7) // 8 * 8
+            cmd = struct.pack("<IIIIII", mp.LC_LOAD_DYLIB, padded_size, header_size, 0,
+                               mp.encode_version("1.0.0"), mp.encode_version("1.0.0"))
+            cmd += name
+            cmd += b"\x00" * (padded_size - len(cmd))
+            return cmd
+
+        foundation_cmd = dylib_cmd(b"/System/Library/Frameworks/Foundation.framework/Foundation")
+        appkit_cmd = dylib_cmd(b"/System/Library/Frameworks/AppKit.framework/AppKit")
+
+        strtab = b"\x00undefined_from_foundation\x00undefined_from_appkit\x00defined_symbol\x00"
+        off_foundation_sym = 1
+        off_appkit_sym = off_foundation_sym + len(b"undefined_from_foundation\x00")
+        off_defined_sym = off_appkit_sym + len(b"undefined_from_appkit\x00")
+
+        N_EXT, N_SECT = 0x01, 0x0E
+        symbols = b"".join([
+            struct.pack("<IBBHQ", off_foundation_sym, N_EXT, 0, 1 << 8, 0),
+            struct.pack("<IBBHQ", off_appkit_sym, N_EXT, 0, 2 << 8, 0),
+            struct.pack("<IBBHQ", off_defined_sym, N_EXT | N_SECT, 0, 0, 0x1000),
+        ])
+
+        symtab_cmd = struct.pack("<IIIIII", mp.LC_SYMTAB, 24, 0, 0, 0, 0)  # placeholder offsets
+
+        ncmds = 4
+        cmds_no_symtab = build_version + foundation_cmd + appkit_cmd
+        sizeofcmds = len(cmds_no_symtab) + len(symtab_cmd)
+        header = struct.pack("<IiiIIIII", mp.MH_MAGIC_64, mp.CPU_TYPE_ARM64, 0,
+                              2, ncmds, sizeofcmds, 0, 0)
+
+        symoff = 32 + sizeofcmds
+        stroff = symoff + len(symbols)
+        symtab_cmd = struct.pack("<IIIIII", mp.LC_SYMTAB, 24, symoff, 3, stroff, len(strtab))
+
+        return bytearray(header + cmds_no_symtab + symtab_cmd + symbols + strtab)
+
+    def test_undefined_symbols_by_dependency_correlates_ordinals(self):
+        data = self._build_macho_with_symbols_and_deps()
+        header = mp.parse_header(data)
+        by_dep = mp.undefined_symbols_by_dependency(data, header)
+        self.assertEqual(
+            by_dep,
+            {
+                "/System/Library/Frameworks/Foundation.framework/Foundation": ["undefined_from_foundation"],
+                "/System/Library/Frameworks/AppKit.framework/AppKit": ["undefined_from_appkit"],
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

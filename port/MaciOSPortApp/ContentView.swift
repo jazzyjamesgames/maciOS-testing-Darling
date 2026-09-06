@@ -87,13 +87,25 @@ struct ContentView: View {
 
     private func testProcessHost(frameworksRelativePath: String, entryPoint: String, label: String) {
         log.log("Test ProcessHost (\(label)) tapped: my pid is \(ProcessInfo.processInfo.processIdentifier)")
-        MaciOSTestProcessHost(frameworksRelativePath, entryPoint) { launched, pid, message in
+        // Positional, matching this C function's existing (CI-proven)
+        // unlabeled-parameter calling convention -- not trailing-closure
+        // sugar, since that requires a real argument label per parameter
+        // once there's more than one closure.
+        MaciOSTestProcessHost(frameworksRelativePath, entryPoint, { launched, pid, message in
             if launched {
                 log.log("ProcessHost (\(label)) LAUNCHED, reported pid=\(pid)")
             } else {
                 log.log("ProcessHost (\(label)) FAILED: \(message ?? "(no message)")")
             }
-        }
+        }, { received, exitCode, error in
+            // The Darwin-notification reply channel (docs/process-host.md) --
+            // third attempt at this, the first two having been tried and
+            // ruled out on-device. If this line never appears, this one
+            // didn't pan out either.
+            if received {
+                log.log("ProcessHost (\(label)) REPLY: exitCode=\(exitCode) error=\(error ?? "nil")")
+            }
+        })
     }
 }
 

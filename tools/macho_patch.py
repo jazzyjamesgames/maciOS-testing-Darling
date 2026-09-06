@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Minimal Mach-O patcher for the maciOS bring-up milestone.
 
-Two independent operations:
+Two independent core operations, plus dependency-resolution tooling
+(deps/check-deps/redirect-deps -- see docs/dependency-resolution.md) for
+M3's "what does this real binary actually need" question:
 
   patch     Rewrite the platform tag of a thin arm64 Mach-O (macOS -> iOS)
             in place, then recompute the ad-hoc CodeDirectory page hashes so
@@ -27,7 +29,9 @@ source vs. an already-compiled binary loaded by process-host/).
 """
 import argparse
 import hashlib
+import os
 import struct
+import subprocess
 import sys
 
 MH_MAGIC_64 = 0xFEEDFACF
@@ -43,6 +47,16 @@ LC_SYMTAB = 0x2
 LC_LOAD_DYLINKER = 0xE
 LC_ID_DYLIB = 0xD
 LC_CODE_SIGNATURE = 0x1D
+LC_LOAD_DYLIB = 0xC
+LC_LOAD_WEAK_DYLIB = 0x80000018
+LC_REEXPORT_DYLIB = 0x8000001F
+LC_LOAD_UPWARD_DYLIB = 0x80000023
+DYLIB_LOAD_KINDS = {
+    LC_LOAD_DYLIB: "required",
+    LC_LOAD_WEAK_DYLIB: "weak",
+    LC_REEXPORT_DYLIB: "reexport",
+    LC_LOAD_UPWARD_DYLIB: "upward",
+}
 LC_VERSION_MIN_MACOSX = 0x24
 LC_VERSION_MIN_IPHONEOS = 0x25
 LC_VERSION_MIN_TVOS = 0x2F
@@ -342,11 +356,16 @@ N_UNDF = 0x00
 
 
 def list_symbols(data, header):
-    """Yield {'name', 'external', 'defined', 'value'} for every symbol in
-    the file's LC_SYMTAB. Useful for confirming a specific entry point
-    survives patch/dylibify with external linkage intact -- e.g. that
-    dlsym() will actually be able to find it -- rather than just assuming
-    a byte-level patch didn't disturb the symbol table."""
+    """Yield {'name', 'external', 'defined', 'value', 'library_ordinal'} for
+    every symbol in the file's LC_SYMTAB. Useful for confirming a specific
+    entry point survives patch/dylibify with external linkage intact --
+    e.g. that dlsym() will actually be able to find it -- rather than just
+    assuming a byte-level patch didn't disturb the symbol table.
+
+    library_ordinal is the two-level-namespace ordinal from n_desc (1-based
+    index into the file's LC_LOAD_DYLIB-family commands, in the order
+    list_dylib_dependencies yields them -- see undefined_symbols_by_dependency,
+    which is what actually uses this)."""
     symoff = nsyms = stroff = None
     for i, off, cmd, cmdsize in iter_load_commands(data, header):
         if cmd == LC_SYMTAB:
@@ -356,7 +375,7 @@ def list_symbols(data, header):
         return
     for i in range(nsyms):
         entry_off = symoff + i * 16  # sizeof(struct nlist_64)
-        n_strx, n_type, _n_sect, _n_desc, n_value = struct.unpack_from(
+        n_strx, n_type, _n_sect, n_desc, n_value = struct.unpack_from(
             "<IBBHQ", data, entry_off)
         name_off = stroff + n_strx
         name_end = data.index(b"\x00", name_off)
@@ -366,7 +385,166 @@ def list_symbols(data, header):
             "external": bool(n_type & N_EXT),
             "defined": (n_type & N_TYPE) != N_UNDF,
             "value": n_value,
+            "library_ordinal": (n_desc >> 8) & 0xFF,
         }
+
+
+def undefined_symbols_by_dependency(data, header):
+    """Groups undefined (imported) external symbols by which
+    LC_LOAD_DYLIB-family dependency they're resolved against, via each
+    symbol's two-level-namespace library ordinal. This is the exact,
+    precise list a stub replacing that dependency would need to export --
+    not a guess at a whole framework's surface, just the handful of symbols
+    this specific binary actually calls. Ordinals outside the dependency
+    list (SELF_LIBRARY_ORDINAL=0, DYNAMIC_LOOKUP_ORDINAL=0xfe,
+    EXECUTABLE_ORDINAL=0xff) are skipped -- they don't name a real
+    dependency to stub."""
+    deps = list(list_dylib_dependencies(data, header))
+    by_ordinal = {}
+    for sym in list_symbols(data, header):
+        if sym["defined"] or not sym["external"]:
+            continue
+        ordinal = sym["library_ordinal"]
+        if ordinal < 1 or ordinal > len(deps):
+            continue
+        by_ordinal.setdefault(ordinal, []).append(sym["name"])
+    return {deps[ordinal - 1]["path"]: sorted(names) for ordinal, names in by_ordinal.items()}
+
+
+def list_dylib_dependencies(data, header):
+    """Yield {'kind', 'path', 'current_version', 'compatibility_version',
+    'offset', 'cmdsize', 'name_offset'} for every LC_LOAD_DYLIB-family load
+    command -- the binary's own declared runtime dependencies (frameworks
+    and dylibs dyld will need to resolve when it's actually run). This is
+    the starting point for M3's dependency-resolution work (MILESTONES.md):
+    before porting a real macOS binary, find out what it actually links
+    against and which of those exist on iOS at all."""
+    for i, off, cmd, cmdsize in iter_load_commands(data, header):
+        kind = DYLIB_LOAD_KINDS.get(cmd)
+        if kind is None:
+            continue
+        name_off, timestamp, current_version, compat_version = struct.unpack_from(
+            "<IIII", data, off + 8)
+        name_start = off + name_off
+        name_end = data.index(b"\x00", name_start)
+        path = bytes(data[name_start:name_end]).decode("utf-8", "replace")
+        yield {
+            "kind": kind,
+            "path": path,
+            "current_version": decode_version(current_version),
+            "compatibility_version": decode_version(compat_version),
+            "offset": off,
+            "cmdsize": cmdsize,
+            "name_offset": name_off,
+        }
+
+
+def redirect_dylib_dependency(data, header, old_path, new_path):
+    """Rewrite one LC_LOAD_DYLIB-family command's path string in place --
+    e.g. pointing a macOS-only framework's install name at an iOS
+    equivalent under a different path (OpenGL.framework -> OpenGLES.framework
+    is the classic example), or at a stub dylib bundled inside the app for
+    something iOS has no equivalent of at all. See docs/dependency-resolution.md.
+
+    Never grows or relocates load commands -- the replacement must fit in
+    the existing command's size, the same constraint dylibify hits with
+    LC_LOAD_DYLINKER's slot (cmdsize is fixed at compile time; a longer
+    replacement needs full load-command relocation, not implemented here)."""
+    match = None
+    for dep in list_dylib_dependencies(data, header):
+        if dep["path"] == old_path:
+            match = dep
+            break
+    if match is None:
+        raise MachOError("no LC_LOAD_DYLIB-family dependency with path %r found" % old_path)
+
+    off = match["offset"]
+    cmdsize = match["cmdsize"]
+    name_off = match["name_offset"]
+    available = cmdsize - name_off - 1  # room for the new name, minus its NUL
+    new_name = new_path.encode("utf-8")
+    if len(new_name) > available:
+        raise MachOError(
+            "redirect path %r (%d bytes) doesn't fit in the %d bytes available "
+            "in %r's dependency load command (cmdsize is fixed at compile "
+            "time; a longer replacement needs full load-command relocation, "
+            "not implemented here)" % (new_path, len(new_name), available, old_path))
+    name_region_start = off + name_off
+    name_region_end = off + cmdsize
+    for i in range(name_region_start, name_region_end):
+        data[i] = 0
+    data[name_region_start:name_region_start + len(new_name)] = new_name
+    return match
+
+
+# Best-effort seed list for offline use (this repo's own Linux sandbox has
+# no iOS SDK at all to check against). Keyed by the framework/dylib's own
+# basename so it matches regardless of which OS version's path is in the
+# header. When an --ios-sdk-path is available (e.g. the real macOS CI
+# runner, which has one at a known Xcode location -- see
+# _detect_ios_sdk_path), that's the authoritative source instead: this
+# table is only ever a guess, and is deliberately non-exhaustive rather
+# than confidently wrong about anything not looked up directly against a
+# real SDK. See docs/dependency-resolution.md for how each entry here was
+# decided and where to add more once a real M3 target names them.
+KNOWN_IOS_AVAILABILITY = {
+    # Available on iOS -- same framework/dylib name, present in the SDK.
+    "libSystem.B.dylib": True, "libobjc.A.dylib": True, "libc++.1.dylib": True,
+    "libc++abi.dylib": True, "libz.1.dylib": True, "libsqlite3.dylib": True,
+    "libxml2.2.dylib": True, "libcompression.dylib": True,
+    "Foundation": True, "CoreFoundation": True, "CoreGraphics": True,
+    "CoreText": True, "CoreImage": True, "Security": True, "Network": True,
+    "CFNetwork": True, "SystemConfiguration": True, "CoreAudio": True,
+    "AudioToolbox": True, "AVFoundation": True, "CoreMedia": True,
+    "ImageIO": True, "QuartzCore": True, "LocalAuthentication": True,
+    "Combine": True, "SwiftUI": True, "CryptoKit": True,
+    "UniformTypeIdentifiers": True, "WebKit": True, "PDFKit": True,
+    "Metal": True, "MetalKit": True, "StoreKit": True,
+    # macOS-only -- no iOS counterpart at all (needs a stub, or the
+    # functionality dropped if the payload can tolerate that).
+    "AppKit": False, "Cocoa": False, "Carbon": False, "CoreServices": False,
+    "DiskArbitration": False, "ServiceManagement": False, "IOBluetooth": False,
+    "IOKit": False, "Quartz": False, "ScriptingBridge": False,
+    "OpenDirectory": False, "Automator": False, "PreferencePanes": False,
+    "InstallerPlugins": False, "CoreWLAN": False, "SecurityInterface": False,
+    "OpenGL": False,  # iOS has OpenGLES.framework instead -- a redirect target
+}
+
+
+def _detect_ios_sdk_path():
+    """Only works on a real macOS toolchain (e.g. the CI runner in
+    .github/workflows/build.yml) -- returns None in this repo's own Linux
+    sandbox, where there is no Xcode/xcrun at all."""
+    try:
+        result = subprocess.run(["xcrun", "--sdk", "iphoneos", "--show-sdk-path"],
+                                 capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    path = result.stdout.strip()
+    return path or None
+
+
+def classify_dependency(path, ios_sdk_path=None):
+    """Returns (status, detail): status is 'available', 'unavailable', or
+    'unknown'. Verified directly against a real iOS SDK's on-disk layout
+    when ios_sdk_path is given (the authoritative source -- SDKs mirror the
+    runtime's absolute framework/dylib paths under their own root, e.g.
+    <sdk>/System/Library/Frameworks/Foundation.framework/Foundation). Falls
+    back to the best-effort KNOWN_IOS_AVAILABILITY table otherwise, which is
+    what to trust only until a real SDK is available to check instead."""
+    basename = path.rsplit("/", 1)[-1]
+    if ios_sdk_path:
+        candidate = os.path.join(ios_sdk_path, path.lstrip("/"))
+        exists = os.path.exists(candidate)
+        return ("available" if exists else "unavailable",
+                "verified against %s" % ios_sdk_path)
+    known = KNOWN_IOS_AVAILABILITY.get(basename)
+    if known is None:
+        return ("unknown", "not in the built-in seed list -- check manually "
+                            "or pass --ios-sdk-path")
+    return ("available" if known else "unavailable", "best-effort guess, not SDK-verified")
 
 
 def cmd_info(args):
@@ -409,6 +587,96 @@ def cmd_symbols(args):
     if args.grep and not found:
         print("error: no symbol matching %r found" % args.grep, file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_deps(args):
+    with open(args.binary, "rb") as f:
+        data = bytearray(f.read())
+    header = parse_header(data)
+    found = False
+    for dep in list_dylib_dependencies(data, header):
+        found = True
+        print("%-9s %s (current=%s compatibility=%s)" %
+              (dep["kind"], dep["path"], dep["current_version"], dep["compatibility_version"]))
+    if not found:
+        print("(no LC_LOAD_DYLIB-family dependencies found)")
+    return 0
+
+
+def cmd_check_deps(args):
+    with open(args.binary, "rb") as f:
+        data = bytearray(f.read())
+    header = parse_header(data)
+
+    ios_sdk_path = args.ios_sdk_path
+    if not ios_sdk_path and args.auto_detect_sdk:
+        ios_sdk_path = _detect_ios_sdk_path()
+        if ios_sdk_path:
+            print("auto-detected iOS SDK: %s" % ios_sdk_path)
+        else:
+            print("warning: --auto-detect-sdk given but no iOS SDK found "
+                  "(no xcrun, or this isn't a macOS toolchain) -- falling "
+                  "back to the built-in best-effort table")
+
+    unavailable = []
+    unknown = []
+    any_dep = False
+    for dep in list_dylib_dependencies(data, header):
+        any_dep = True
+        status, detail = classify_dependency(dep["path"], ios_sdk_path)
+        print("%-12s %-9s %s (%s)" % (status, dep["kind"], dep["path"], detail))
+        if status == "unavailable":
+            unavailable.append(dep["path"])
+        elif status == "unknown":
+            unknown.append(dep["path"])
+    if not any_dep:
+        print("(no LC_LOAD_DYLIB-family dependencies found)")
+
+    if unavailable:
+        by_dep = undefined_symbols_by_dependency(data, header)
+        print("\n%d dependenc%s with no iOS counterpart -- needs a redirect "
+              "or a stub (see docs/dependency-resolution.md):" %
+              (len(unavailable), "y" if len(unavailable) == 1 else "ies"))
+        for p in unavailable:
+            print("  -", p)
+            for sym in by_dep.get(p, []):
+                print("      needs:", sym)
+    if unknown:
+        print("\n%d dependenc%s not classified -- check manually, or pass "
+              "--ios-sdk-path/--auto-detect-sdk for a verified answer:" %
+              (len(unknown), "y" if len(unknown) == 1 else "ies"))
+        for p in unknown:
+            print("  -", p)
+
+    if unavailable and not args.allow_unavailable:
+        return 1
+    return 0
+
+
+def cmd_redirect_deps(args):
+    with open(args.binary, "rb") as f:
+        data = bytearray(f.read())
+    header = parse_header(data)
+    for mapping in args.redirect:
+        if "=" not in mapping:
+            print("error: --redirect expects OLDPATH=NEWPATH, got %r" % mapping, file=sys.stderr)
+            return 1
+        old_path, new_path = mapping.split("=", 1)
+        match = redirect_dylib_dependency(data, header, old_path, new_path)
+        print("redirected %s -> %s (kind=%s)" % (old_path, new_path, match["kind"]))
+    if args.resign:
+        updated = resign_adhoc(data, header)
+        if updated is None:
+            print("warning: no LC_CODE_SIGNATURE found; nothing to resign")
+        else:
+            print("resigned %d CodeDirectory blob(s) in place (ad hoc, no trust chain)" % updated)
+    else:
+        print("warning: --no-resign given; existing signature hashes are now invalid")
+    out_path = args.output or args.binary
+    with open(out_path, "wb") as f:
+        f.write(data)
+    print("wrote", out_path)
     return 0
 
 
@@ -503,6 +771,33 @@ def main(argv=None):
     p_symbols.add_argument("--defined-only", action="store_true",
                             help="skip undefined (imported) symbols")
     p_symbols.set_defaults(func=cmd_symbols)
+
+    p_deps = sub.add_parser(
+        "deps", help="list LC_LOAD_DYLIB-family dependencies (frameworks/dylibs the binary needs)")
+    p_deps.add_argument("binary")
+    p_deps.set_defaults(func=cmd_deps)
+
+    p_check_deps = sub.add_parser(
+        "check-deps", help="classify each dependency as available/unavailable on iOS")
+    p_check_deps.add_argument("binary")
+    p_check_deps.add_argument("--ios-sdk-path", help="check against a real iOS SDK's on-disk layout "
+                                                       "(authoritative) instead of the built-in guess table")
+    p_check_deps.add_argument("--auto-detect-sdk", action="store_true",
+                               help="try `xcrun --sdk iphoneos --show-sdk-path` if --ios-sdk-path is not given "
+                                    "(only works on a real macOS toolchain, e.g. CI)")
+    p_check_deps.add_argument("--allow-unavailable", action="store_true",
+                               help="exit 0 even if an unavailable dependency is found (default: exit 1, for CI gating)")
+    p_check_deps.set_defaults(func=cmd_check_deps)
+
+    p_redirect_deps = sub.add_parser(
+        "redirect-deps", help="rewrite a dependency's path in place (e.g. to an iOS equivalent or a bundled stub)")
+    p_redirect_deps.add_argument("binary")
+    p_redirect_deps.add_argument("-o", "--output", help="output path (default: overwrite input)")
+    p_redirect_deps.add_argument("--redirect", action="append", required=True, metavar="OLDPATH=NEWPATH",
+                                  help="may be given more than once")
+    p_redirect_deps.add_argument("--no-resign", dest="resign", action="store_false",
+                                  help="skip recomputing ad-hoc CodeDirectory hashes")
+    p_redirect_deps.set_defaults(func=cmd_redirect_deps, resign=True)
 
     args = parser.parse_args(argv)
     try:

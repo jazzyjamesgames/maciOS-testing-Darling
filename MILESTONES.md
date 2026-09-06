@@ -153,21 +153,44 @@ touching its source.
       not a hang or crash): this `com.apple.ar.viewer`-based extension
       point doesn't accept a caller-supplied listener endpoint this way.
       Reverted rather than kept as known-broken code; see
-      `docs/process-host.md`'s reply-channel section for the full record
-      and what's untried (an `options:`-dictionary variant of the same
-      call; Darwin notifications, per `ios18-probe`'s own fallback).
-- [ ] Once a real (non-trivial) macOS binary is the target, expect to
-      spend most of the effort on dependency resolution: any macOS-only
-      framework the binary links
-      against needs either a redirect to iOS's real equivalent (if one
-      exists, just under a different path — `Foundation`, `CoreFoundation`,
-      `CoreGraphics`, `Security` are the ones confirmed to have iOS
-      equivalents in the prior art this milestone draws on) or a stub
-      implementation (if no iOS equivalent exists at all — confirmed
-      necessary for things like `DiskArbitration`, `ServiceManagement` in
-      that same prior art). `tools/macho_patch.py` doesn't automate
-      dependency redirection yet; that's the next thing to add to it once
-      a real target names which dependencies actually matter.
+      `docs/process-host.md`'s reply-channel section for the full record.
+      **Third attempt, built and awaiting on-device confirmation**: Darwin
+      notifications (`CFNotificationCenterGetDarwinNotifyCenter()`) --
+      real, public, documented API, unlike the two private-API attempts
+      above, and `ios18-probe`'s own fallback once it found App Group files
+      don't survive SideStore's resign. The exit code/error is encoded
+      directly into the notification's own name (no `userInfo` payload on
+      the Darwin center), scoped by a host-chosen `requestUUID`, shared
+      between `ProcessHostTester.m` and `process-host/main.m` via
+      `process-host/MaciOSProcessHostDarwinReply.h`/`.m`. Logs a `REPLY:
+      exitCode=... error=...` line in `ContentView.swift`'s two "Test
+      ProcessHost" buttons if and when it arrives.
+- [x] Dependency-resolution tooling built ahead of a specific M3 target
+      (see `docs/dependency-resolution.md`): `tools/macho_patch.py deps`
+      lists a binary's `LC_LOAD_DYLIB`-family dependencies;
+      `check-deps` classifies each as available/unavailable on iOS —
+      verified against a real SDK when one is reachable
+      (`--auto-detect-sdk`, exercised on every push in
+      `.github/workflows/build.yml` against the real macOS CI runner) or a
+      best-effort seed table otherwise — and for each unavailable one,
+      lists the *exact* undefined symbols this binary needs from it (via
+      `LC_SYMTAB`'s two-level-namespace library ordinals, not a guess at
+      the whole framework's surface); `redirect-deps` rewrites a
+      dependency's path in place (same in-place-size constraint as
+      `dylibify`'s install name). Not yet exercised against a real,
+      non-trivial target — no specific tool has been picked for M3 yet —
+      but the tool itself is tested (19 unit tests, `tests/test_macho_patch.py`)
+      and CI-verified against a real iOS SDK.
+- [ ] Once a real (non-trivial) macOS binary is the target, run the above
+      against it: `check-deps` will name which frameworks need a redirect
+      (an iOS equivalent under a different path — `OpenGL` → `OpenGLES` is
+      the known example) versus a hand-written stub (no iOS equivalent at
+      all — `DiskArbitration`, `ServiceManagement`, `AppKit` are confirmed
+      examples in the prior art this milestone draws on). Stub *generation*
+      from a symbol list is still a manual step — see
+      `docs/dependency-resolution.md`'s closing section for why automating
+      that further isn't worth doing blind, before a real target's own
+      list is in hand.
 
 **Definition of done:** ✅ `process-host/` reports back a real PID (different
 from the host app's own), for a binary that was patched, not recompiled.

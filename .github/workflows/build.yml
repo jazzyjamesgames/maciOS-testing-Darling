@@ -46,6 +46,16 @@ jobs:
       - name: Build and patch the real macOS-binary test payload
         run: ./test-payload/build-and-patch.sh
 
+      - name: Check the patched payload's dependencies against the real iOS SDK
+        run: |
+          python3 tools/macho_patch.py check-deps test-payload/PatchedMacOSPayload.dylib --auto-detect-sdk
+        # This is the tool M3's dependency-resolution work (MILESTONES.md,
+        # docs/dependency-resolution.md) will run against a real target once
+        # one is picked -- exercised here against the payload this CI already
+        # builds (which links /usr/lib/libSystem.B.dylib after the -lSystem
+        # fix) so the tool itself is proven against a real SDK on every push,
+        # not just this repo's own offline/synthetic tests.
+
       - name: Generate Xcode project
         run: xcodegen generate
 

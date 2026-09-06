@@ -14,6 +14,9 @@
 // binary run through tools/macho_patch.py's actual patch+dylibify
 // pipeline -- proves the thing M2 is actually about).
 #import "ProcessHostTester.h"
+#import "../../process-host/MaciOSProcessHostDarwinReply.h"
+#import <CoreFoundation/CoreFoundation.h>
+#import <objc/runtime.h>
 
 @interface NSExtension : NSObject
 + (instancetype)extensionWithIdentifier:(NSString *)identifier error:(NSError **)error;
@@ -22,28 +25,74 @@
 - (void)setRequestCancellationBlock:(void (^)(NSUUID *uuid, NSError *error))callback;
 @end
 
-// Scoped deliberately narrow: this answers "did process-host/'s
-// com.apple.ar.viewer extension trick get a genuinely separate real OS
-// process at all" -- the load-bearing claim behind the whole approach --
-// using only the two signals ios18-probe already confirmed work
-// (pidForRequestIdentifier:, the cancellation block for failure). It does
-// NOT attempt to read back process-host/main.m's exitCode/error reply
-// payload. Two things were tried for that and both are dead ends, per
-// on-device testing and docs/process-host.md:
-//   - completeRequestReturningItems: itself -- NSExtension's own dumped
-//     method surface has no accessor for it at all on the host side.
-//   - Passing an NSXPCListenerEndpoint via
-//     beginExtensionRequestWithInputItems:listenerEndpoint:completion:,
-//     retrieved on the extension side via NSExtensionContext's private
-//     _auxiliaryListener -- confirmed on-device to be rejected outright
-//     by this extension point (a fast, clean nil identifier for both
-//     payloads, not a hang or a crash: the framework validates and
-//     refuses the request before ever launching anything).
-// Better to ship a smaller, honestly-scoped test than a bigger one built
-// on a mechanism now known not to work for this extension point.
+// The host-side end of the Darwin-notification reply channel: registers
+// for every Darwin notification system-wide (there is no way to filter
+// server-side on a name that encodes a payload we don't know in advance)
+// and filters by requestUUID prefix itself, per
+// MaciOSProcessHostDarwinReply.h. Kept alive past MaciOSTestProcessHost's
+// return via objc_setAssociatedObject on the NSExtension instance (which
+// already outlives the call through its own captured blocks) -- the whole
+// point is this fires *after* this function returns.
+@interface MaciOSDarwinReplyObserver : NSObject
+@property(nonatomic, copy) NSString *requestUUID;
+@property(nonatomic, copy) MaciOSProcessHostExitCode completion;
+- (void)start;
+- (void)handleNotificationName:(NSString *)name;
+@end
+
+static void MaciOSDarwinNotifyTrampoline(CFNotificationCenterRef center, void *observerPtr,
+                                          CFNotificationName name, const void *object,
+                                          CFDictionaryRef userInfo) {
+  MaciOSDarwinReplyObserver *observer = (__bridge MaciOSDarwinReplyObserver *)observerPtr;
+  [observer handleNotificationName:(__bridge NSString *)name];
+}
+
+@implementation MaciOSDarwinReplyObserver
+
+- (void)start {
+  CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                   (__bridge const void *)self,
+                                   MaciOSDarwinNotifyTrampoline,
+                                   NULL,  // NULL name: observe everything, filter ourselves
+                                   NULL,
+                                   CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
+- (void)handleNotificationName:(NSString *)name {
+  BOOL success = NO;
+  int exitCode = 0;
+  NSString *error = nil;
+  if (!MaciOSParseProcessHostReplyName(name, self.requestUUID, &success, &exitCode, &error)) {
+    return;  // not ours -- expected for almost every Darwin notification system-wide
+  }
+  CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                      (__bridge const void *)self, NULL, NULL);
+  if (self.completion) {
+    self.completion(success, exitCode, error);
+  }
+}
+
+@end
+
+// completion fires on launch, using the two signals ios18-probe already
+// confirmed work (pidForRequestIdentifier:, the cancellation block for
+// failure) -- the load-bearing claim behind the whole approach, confirmed
+// on-device already (see MILESTONES.md).
+//
+// exitCodeCompletion is the reply-channel experiment, currently on its
+// third attempt: completeRequestReturningItems: has no host-side accessor
+// at all (per NSExtension's own dumped method surface), and passing an
+// NSXPCListenerEndpoint via beginExtensionRequestWithInputItems:
+// listenerEndpoint:completion: was tested on-device and rejected outright
+// by this extension point (see docs/process-host.md). This attempt uses
+// CFNotificationCenterGetDarwinNotifyCenter() instead -- real, public,
+// documented API that crosses the app/extension sandbox boundary without
+// needing an App Group (which ios18-probe found doesn't survive
+// SideStore's resign anyway). Not yet confirmed on-device.
 void MaciOSTestProcessHost(NSString *frameworksRelativePath,
                            NSString *entryPoint,
-                           MaciOSProcessHostResult completion) {
+                           MaciOSProcessHostResult completion,
+                           MaciOSProcessHostExitCode exitCodeCompletion) {
   NSURL *plugInsURL = [[NSBundle mainBundle] builtInPlugInsURL];
   NSArray<NSURL *> *contents = [[NSFileManager defaultManager]
       contentsOfDirectoryAtURL:plugInsURL
@@ -90,11 +139,31 @@ void MaciOSTestProcessHost(NSString *frameworksRelativePath,
   NSString *dylibPath = [[[NSBundle mainBundle] privateFrameworksURL]
       URLByAppendingPathComponent:frameworksRelativePath].path;
 
+  // Our own request UUID, not the one beginExtensionRequestWithInputItems:
+  // completion:'s callback later hands back -- generated up front so we
+  // can register the Darwin notification observer before the extension
+  // could possibly have anything to reply with, and passed through so
+  // process-host/main.m can address its reply to exactly this call.
+  NSString *requestUUID = [[NSUUID UUID] UUIDString];
+
   NSExtensionItem *item = [NSExtensionItem new];
   item.userInfo = @{
     @"dylibPath" : dylibPath ?: @"",
     @"entryPoint" : entryPoint,
+    @"requestUUID" : requestUUID,
   };
+
+  MaciOSDarwinReplyObserver *observer = [MaciOSDarwinReplyObserver new];
+  observer.requestUUID = requestUUID;
+  observer.completion = exitCodeCompletion;
+  [observer start];
+
+  // ext already outlives this function's return via the retain cycle its
+  // own captured completion/cancellation blocks create (a pre-existing
+  // pattern, not new here) -- piggyback the observer on that same
+  // lifetime rather than inventing a second one.
+  static const void *kReplyObserverKey = &kReplyObserverKey;
+  objc_setAssociatedObject(ext, kReplyObserverKey, observer, OBJC_ASSOCIATION_RETAIN);
 
   [ext setRequestCancellationBlock:^(NSUUID *uuid, NSError *cancelError) {
     completion(NO, 0, [NSString stringWithFormat:@"request cancelled (process likely died): %@",

@@ -42,20 +42,24 @@
 //                    from here, same limitation noted throughout
 //                    ios18-probe's own probe app)
 //
-// Whether this reply is actually observable from the host side is still
-// an open question -- per docs/process-host.md, NSExtension's own dumped
-// method surface has no accessor for it at all, and the one alternative
-// tried (an NSXPCConnection back through NSExtensionContext's private
-// _auxiliaryListener, fed by a listenerEndpoint the host would pass into
-// beginExtensionRequestWithInputItems:listenerEndpoint:completion:) was
-// tested on-device and found to be a dead end: that call is rejected
-// outright by this extension point before ever reaching this file, so
-// _auxiliaryListener is never populated to begin with. See
-// docs/process-host.md's reply-channel section for what's next
-// (Darwin notifications, per ios18-probe's own fallback).
+// completeRequestReturningItems: itself is NOT observable from the host
+// side -- per docs/process-host.md, NSExtension's own dumped method
+// surface has no accessor for it at all. A second attempt (an
+// NSXPCConnection back through NSExtensionContext's private
+// _auxiliaryListener) was tested on-device and found to be a dead end too:
+// the host-side call that would have populated it is rejected outright by
+// this extension point before ever reaching this file. This file's actual
+// reply channel is now CFNotificationCenterGetDarwinNotifyCenter() --
+// real, public, documented API that crosses the app/extension sandbox
+// boundary without an App Group (which ios18-probe found doesn't survive
+// SideStore's resign anyway) -- see
+// MaciOSProcessHostDarwinReply.h/docs/process-host.md. Not yet confirmed
+// on-device.
 #import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 #import <unistd.h>
+#import "MaciOSProcessHostDarwinReply.h"
 
 typedef int (*ProcessHostEntry)(void);
 
@@ -68,11 +72,19 @@ typedef int (*ProcessHostEntry)(void);
   NSDictionary *request = [context.inputItems.firstObject userInfo];
   NSString *dylibPath = request[@"dylibPath"];
   NSString *entryPointName = request[@"entryPoint"];
+  NSString *requestUUID = request[@"requestUUID"];
 
   NSMutableDictionary *reply = [NSMutableDictionary dictionary];
   reply[@"pid"] = @(getpid());
 
   void (^finish)(void) = ^{
+    if (requestUUID.length) {
+      NSString *name = reply[@"error"]
+          ? MaciOSProcessHostReplyFailureName(requestUUID, reply[@"error"])
+          : MaciOSProcessHostReplySuccessName(requestUUID, [reply[@"exitCode"] intValue]);
+      CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                            (__bridge CFStringRef)name, NULL, NULL, true);
+    }
     NSExtensionItem *replyItem = [NSExtensionItem new];
     replyItem.userInfo = reply;
     [context completeRequestReturningItems:@[ replyItem ] completionHandler:nil];

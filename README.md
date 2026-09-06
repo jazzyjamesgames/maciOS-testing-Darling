@@ -47,7 +47,9 @@ Program):
   patcher both paths above are built on: platform-tag rewriting and
   `MH_EXECUTE` → `MH_DYLIB` conversion, both validated against a real
   cross-compiled binary (see `AUDIT.md` section 2 and
-  `tests/test_macho_patch.py`).
+  `tests/test_macho_patch.py`). It also lists/classifies/redirects a
+  binary's framework dependencies ahead of M3 — see
+  [`docs/dependency-resolution.md`](docs/dependency-resolution.md).
 
 Run the patcher's tests with:
 
