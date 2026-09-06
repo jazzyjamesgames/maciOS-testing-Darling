@@ -60,6 +60,10 @@ targets:
     platform: iOS
     sources:
       - path: test-payload
+    info:
+      path: test-payload/Info.plist
+      properties:
+        CFBundleDisplayName: TestPayload
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.local.maciOS.TestPayload
