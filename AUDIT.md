@@ -165,11 +165,22 @@ can be declared with two properties most extension points don't get:
 
 `NSExtensionActivationRule: FALSEPREDICATE` means the real AR Quick Look
 flow never triggers it; it only runs when the app's own code requests it
-by identifier via ordinary, public `NSExtension` API
-(`extensionWithIdentifier:error:`, `beginExtensionRequestWithInputItems:`).
-Because it's a declared extension bundled and signed as part of the
-container app, the same install-time resign from section 2 covers it —
-no separate signing story needed.
+by identifier via `NSExtension` — a real class, but an undocumented one
+(no public header; `extensionWithIdentifier:error:`,
+`beginExtensionRequestWithInputItems:` have to be forward-declared, same
+as LiveContainer's own `FoundationPrivate.h` does it). Because it's a
+declared extension bundled and signed as part of the container app, the
+same install-time resign from section 2 covers it — no separate signing
+story needed.
+
+**Confirmed on-device, 2026-09-06** (iPhone 14, iOS 26.1, not jailbroken):
+the host app (pid 1867) invoked `process-host/` and got back pid 1869 — a
+real, different process, produced without ever calling `posix_spawn`. See
+`MILESTONES.md`'s M2 for the exact log. This was the single largest
+remaining unknown in the whole audit: LiveContainer ships this trick and
+`ios18-probe` used it too, but nothing in *this* project had exercised it
+until this test, and there was no guarantee it would behave identically
+on a different device/iOS version. It does.
 
 This project's own version of that component is `process-host/` — see
 `docs/process-host.md` for the full mechanism and the payload contract.
@@ -277,8 +288,13 @@ running inside a normally-installed app, no VM, no emulator, no jailbreak.
 That confirms the whole chain this audit reasoned about actually holds up
 on real hardware, not just in analysis.
 
-M2 is path B (patch an existing compiled binary, run it via
-`process-host/`) — the more general and more powerful of the two, and the
-current focus now that path A is confirmed. Later milestones scale up to
-a real CLI tool, then (much further out, flagged as a large/likely-out-of-
-scope undertaking) a GUI port.
+**M2's core mechanism is confirmed working on-device too (2026-09-06)**:
+the `process-host/` extension trick got a real, separate PID on the same
+iPhone, without ever calling `posix_spawn` — see section 3. M2 is path B
+(patch an existing compiled binary, run it via `process-host/`) — the more
+general and more powerful of the two paths, and now that both paths' core
+mechanisms are confirmed on real hardware, the remaining work is scaling
+up to an actual real-world CLI tool (dependency resolution, section 5)
+rather than validating the underlying approach itself. Later milestones
+scale up to a real CLI tool, then (much further out, flagged as a
+large/likely-out-of-scope undertaking) a GUI port.

@@ -41,7 +41,7 @@ payload, before spending any effort on a real tool's dependencies.
 **Definition of done:** ✅ the app launches on the iPhone and displays the
 string produced by `clicore_run()`.
 
-## M2 — An already-compiled binary, patched and run via `process-host/`
+## M2 — An already-compiled binary, patched and run via `process-host/` — ✅ core mechanism confirmed on-device
 
 **Path B from `AUDIT.md` section 4: you don't need the source.**
 
@@ -75,12 +75,31 @@ touching its source.
       scoped to just the process-spawn question (a real, different PID) —
       see `docs/process-host.md` for why the exit-code reply path is
       treated as unverified rather than assumed.
-- [ ] **On your device**: tap "Test ProcessHost" and report back the
-      logged result (`ProcessHost LAUNCHED, reported pid=...` or
-      `ProcessHost FAILED: ...`). This is the next real unknown — nothing
-      has confirmed the `com.apple.ar.viewer`/`_MultipleInstances` trick
-      actually produces a separate process on *this* device yet.
-- [ ] Once that's confirmed: pick a real small, portable (no AppKit/Cocoa,
+- [x] **On-device, confirmed 2026-09-06**: tapped "Test ProcessHost" on
+      the same iPhone 14 (iOS 26.1, not jailbroken) as M1. In-app log,
+      verbatim:
+      ```
+      [23:37:41.822] app launched
+      [23:37:41.824] clicore_run() -> hello from native arm64 maciOS (ported)
+      [23:37:44.364] Test ProcessHost tapped: my pid is 1867
+      [23:37:44.464] ProcessHost LAUNCHED, reported pid=1869
+      ```
+      **pid 1867 (host app) → pid 1869 (ProcessHost): a real, different
+      process.** The `com.apple.ar.viewer`/`_MultipleInstances`/
+      `_ProcessType:"App"` extension trick genuinely produces a separate
+      OS process on real, non-jailbroken hardware, without ever calling
+      `posix_spawn`. This is the load-bearing claim behind all of M2 and
+      every later milestone that needs real process isolation — confirmed,
+      not just reasoned about from prior art.
+- [ ] Follow-up, not blocking: confirm the exit-code/error reply path
+      (`process-host/main.m`'s `completeRequestReturningItems:`) is
+      actually observable by the caller — still unverified per
+      `docs/process-host.md`. `TestPayload`'s `maciOS_test_entry` returns
+      `42`; if that value can be read back reliably, it's worth wiring in.
+      If not, whatever channel `ios18-probe` fell back to (Darwin
+      notifications, since App Group files didn't survive SideStore's
+      resign) is the next thing to try.
+- [ ] Next real step: pick a real small, portable (no AppKit/Cocoa,
       libSystem/Foundation/CoreFoundation-level dependencies only) macOS
       CLI binary — or reuse `fixtures/hello.s`'s pattern, adapted to
       export a named `int name(void)` entry point instead of calling
@@ -101,7 +120,7 @@ touching its source.
       dependency redirection yet; that's the next thing to add to it once
       a real target names which dependencies actually matter.
 
-**Definition of done:** `process-host/` reports back a real PID (different
+**Definition of done:** ✅ `process-host/` reports back a real PID (different
 from the host app's own). The exit-code/error reply path is a follow-up,
 not required for this milestone's core claim (process isolation without
 `posix_spawn`) to be considered proven.
