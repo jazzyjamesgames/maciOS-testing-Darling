@@ -239,13 +239,33 @@ the notification's own *name*:
 - `ContentView.swift`'s two "Test ProcessHost" buttons log a `REPLY:
   exitCode=... error=...` line if and when this arrives.
 
-**Not yet confirmed on-device as of this writing.** This is real public
-API rather than a guess at private internals, which is a meaningfully
-different confidence level than the first two attempts -- but "the API is
-documented" isn't the same claim as "the round trip actually completes on
-this device, through this specific extension point, in this specific
-sandbox configuration." That still needs the same on-device test the first
-two attempts got.
+**Tested on-device 2026-09-06: no `REPLY:` line, for either payload, even
+after an 11-second wait** (ruling out a simple "didn't wait long enough"
+explanation). A specific, concrete hypothesis for why:
+`CFNotificationCenter.h` documents `NULL` as a wildcard ("if name is
+NULL... all notifications will match"), which `ProcessHostTester.m`'s
+observer relies on since it can't know its expected name -- the exit code
+is embedded in it -- in advance. That documentation isn't scoped to which
+center, though, and the Darwin center specifically wraps the low-level
+`notify(3)` mechanism, whose real registration primitive
+(`notify_register_dispatch`) has historically required an *exact* name
+token per registration -- unlike the local/distributed centers' pure
+userspace pub/sub, which do support a real wildcard. If that's the actual
+behavior here, the observer's callback would never fire for *anything*,
+regardless of whether `process-host/main.m` posted its reply correctly --
+which matches what was observed.
+
+**`port/MaciOSPortApp/DarwinNotificationSniffer.h`/`.m`** (+ a "Sniff
+Darwin Notifications" button) tests this specific hypothesis in
+isolation: it registers with `NULL` the same way, but logs *any*
+notification it receives -- including ones this app had nothing to do
+with, which the system posts constantly regardless of what this app does.
+If tapping this button and waiting produces zero log lines, that confirms
+the wildcard registration itself doesn't work on the Darwin center on this
+device/OS version, independent of anything else in the reply-channel code.
+If it logs unrelated system notifications but still never the app's own
+reply, the bug is elsewhere (the extension not posting, a name-encoding
+mismatch) -- a different, more specific thing to chase next.
 
 ## Known limitations (carried over from ios18-probe's findings, or found here)
 

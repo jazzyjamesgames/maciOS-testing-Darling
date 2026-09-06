@@ -71,6 +71,13 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
 
+            Button("Sniff Darwin Notifications") {
+                MaciOSSniffDarwinNotifications { line in
+                    log.log(line)
+                }
+            }
+            .buttonStyle(.bordered)
+
             Button("Copy Log") {
                 log.copyToPasteboard()
             }
