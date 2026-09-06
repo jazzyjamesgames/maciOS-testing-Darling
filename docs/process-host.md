@@ -139,6 +139,36 @@ before reading it:
   come up at all" -- than "did the payload's exit code come back," and
   it's the one to get answered first.
 
+## Investigating the reply-channel question
+
+`ProcessHostTester.m`'s forward declaration of `NSExtension` only has the
+four methods LiveContainer and `ios18-probe` actually used to prove a
+process launches: `extensionWithIdentifier:error:`,
+`beginExtensionRequestWithInputItems:completion:`, `pidForRequestIdentifier:`,
+`setRequestCancellationBlock:`/`setRequestInterruptionBlock:`. None of
+those needed to observe `main.m`'s `completeRequestReturningItems:` reply
+payload, because neither project asked "what did the extension hand
+back," only "did a separate process come up." Whether a distinct method
+exists for that -- and whether `beginExtensionRequestWithInputItems:completion:`'s
+own completion block is the same "launched" signal `pidForRequestIdentifier:`
+already provides, or something later -- is architecturally unclear from
+the outside: a completion block that fires at launch time (matching the
+timing `ios18-probe` observed) can't also be the vehicle for a result that
+only exists once the extension's work has *finished*, which happens
+later.
+
+Rather than guess at a wider block signature, `NSExtensionIntrospection.h`/`.m`
+asks the real, loaded `NSExtension` class what its actual method surface
+is, using `class_copyMethodList`/`method_getTypeEncoding` -- the same
+"ask the runtime directly" technique `ios18-probe` used against
+CoreSimulator. The "Introspect NSExtension" button in `ContentView.swift`
+dumps every instance and class method, with its raw type encoding, to the
+in-app log. Once that dump is read back (see `docs/getting-logs.md`),
+whatever it reveals decides the next step: wiring a real reply-observing
+method if one exists, or falling back to Darwin notifications (per
+`ios18-probe`'s own fallback, since App Group files didn't survive
+SideStore's resign) if it doesn't.
+
 ## Known limitations (carried over from ios18-probe's findings, or found here)
 
 - **The exit-code/error reply path is unverified**, per above -- treat

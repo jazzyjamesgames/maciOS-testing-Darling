@@ -139,6 +139,13 @@ touching its source.
       once it's worth wiring in. If the reply channel doesn't pan out,
       whatever `ios18-probe` fell back to (Darwin notifications, since
       App Group files didn't survive SideStore's resign) is next to try.
+      **In progress**: `port/MaciOSPortApp/NSExtensionIntrospection.h`/`.m`
+      + an "Introspect NSExtension" button dump the real `NSExtension`
+      class's full method surface via `class_copyMethodList` instead of
+      guessing at a wider completion-block signature — see
+      `docs/process-host.md`'s "Investigating the reply-channel question"
+      section. Not yet run on-device; the dump's contents decide what (if
+      anything) gets wired in next.
 - [ ] Once a real (non-trivial) macOS binary is the target, expect to
       spend most of the effort on dependency resolution: any macOS-only
       framework the binary links
