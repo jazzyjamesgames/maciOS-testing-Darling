@@ -46,6 +46,29 @@ jobs:
       - name: Build and patch the real macOS-binary test payload
         run: ./test-payload/build-and-patch.sh
 
+      - name: Diagnose real iOS SDK layout for libSystem (temporary -- see docs/dependency-resolution.md)
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+          echo "--- files matching *libsystem* under \$SDK/usr/lib ---"
+          find "$SDK/usr/lib" -iname '*libsystem*' -print
+          F=$(find "$SDK/usr/lib" -iname '*libsystem*' -type f | head -1)
+          if [ -n "$F" ]; then
+            echo "--- first 60 lines of $F ---"
+            head -60 "$F"
+          else
+            echo "no file matching *libsystem* found anywhere under \$SDK/usr/lib"
+          fi
+        # Temporary, read-only, exploratory: the 2026-09-06 check-deps fix
+        # (classify_dependency scanning .tbd files for a declared
+        # install-name) still didn't find a match for
+        # /usr/lib/libSystem.B.dylib on a real run against a real SDK --
+        # meaning the assumed .tbd format/location was itself wrong, not
+        # just the original literal-path check. Rather than guess a second
+        # time, this dumps the real SDK's actual layout so the next fix is
+        # based on what's actually there. Remove once check-deps itself is
+        # confirmed correct and this has served its purpose.
+
       - name: Check the patched payload's dependencies against the real iOS SDK
         run: |
           python3 tools/macho_patch.py check-deps test-payload/PatchedMacOSPayload.dylib --auto-detect-sdk --allow-unavailable
