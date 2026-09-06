@@ -302,6 +302,20 @@ class TestDependencyResolution(unittest.TestCase):
             "/System/Library/Frameworks/TotallyMadeUp.framework/TotallyMadeUp")
         self.assertEqual(status, "unknown")
 
+    def test_classify_dependency_special_cases_libsystem_without_sdk_search(self):
+        # Confirmed directly against a real iPhoneOS26.5 SDK (2026-09-06):
+        # there is no discoverable .tbd for the umbrella libSystem.B.dylib
+        # anywhere under usr/lib at all, so neither the path check nor the
+        # .tbd-scanning fallback can ever find it -- this must be a
+        # hardcoded special case, not something an SDK search would solve
+        # given enough cleverness. Passing an ios_sdk_path that couldn't
+        # possibly contain a match confirms the special case bypasses the
+        # search entirely rather than coincidentally succeeding some other way.
+        status, detail = mp.classify_dependency("/usr/lib/libSystem.B.dylib",
+                                                   "/nonexistent/sdk/path")
+        self.assertEqual(status, "available")
+        self.assertIn("not resolved via SDK lookup", detail)
+
     def test_classify_dependency_prefers_sdk_path_when_given(self):
         sdk_dir = Path(self._get_tmp_dir())
         fw_dir = sdk_dir / "System/Library/Frameworks/Foundation.framework"
@@ -317,21 +331,26 @@ class TestDependencyResolution(unittest.TestCase):
         self.assertEqual(status, "unavailable")
 
     def test_classify_dependency_finds_install_name_declared_by_a_relocated_tbd(self):
-        # Reproduces the real gap found on a real iPhoneOS26.5 SDK in CI
-        # (2026-09-06): /usr/lib/libSystem.B.dylib doesn't exist at that
-        # literal path at all, because the SDK's .tbd stub for it lives
-        # under a different filename -- ld resolves by the .tbd's own
-        # declared install-name, not by where the stub file sits on disk.
+        # General case for the .tbd-scanning fallback: a real dylib whose
+        # stub file lives under a different name than the install name it
+        # declares -- ld resolves by the .tbd's own declared install-name,
+        # not by where the stub file sits on disk. (libSystem.B.dylib hits
+        # this same relocation but is special-cased separately -- see
+        # test_classify_dependency_special_cases_libsystem_without_sdk_search
+        # -- because a real SDK doesn't even have a .tbd for it under any
+        # name, which this general mechanism can't and isn't meant to
+        # solve; libFoo here stands in for an ordinary dylib that does have
+        # a discoverable, just relocated, stub.)
         sdk_dir = Path(self._get_tmp_dir())
         lib_dir = sdk_dir / "usr/lib"
         lib_dir.mkdir(parents=True)
-        (lib_dir / "libSystem.tbd").write_text(
+        (lib_dir / "libFoo_internal.tbd").write_text(
             '--- !tapi-tbd-v3\n'
             'archs: [ arm64 ]\n'
-            'install-name: /usr/lib/libSystem.B.dylib\n'
+            'install-name: /usr/lib/libFoo.dylib\n'
             'exports: []\n'
         )
-        status, detail = mp.classify_dependency("/usr/lib/libSystem.B.dylib", str(sdk_dir))
+        status, detail = mp.classify_dependency("/usr/lib/libFoo.dylib", str(sdk_dir))
         self.assertEqual(status, "available")
         self.assertIn("declares this install name", detail)
 

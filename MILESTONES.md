@@ -182,14 +182,17 @@ touching its source.
       but the tool itself is tested (22 unit tests, `tests/test_macho_patch.py`).
       **First real CI run (2026-09-06) found a genuine gap and failed the
       build**: `/usr/lib/libSystem.B.dylib` doesn't exist at that literal
-      path in a real iPhoneOS26.5 SDK at all — its `.tbd` stub lives under
-      a different filename than the install name it declares.
-      `classify_dependency` now also scans every `.tbd` in the SDK for a
-      matching declared install name, not just the literal path — see
-      `docs/dependency-resolution.md`. That fix is itself unverified
-      against a real SDK (no Xcode in this repo's own sandbox to test it
-      with), so the CI step runs with `--allow-unavailable` until its own
-      output confirms `libSystem.B.dylib` reports `available`.
+      path in a real iPhoneOS26.5 SDK at all. The first fix attempt
+      (scanning every `.tbd` for a matching declared install name) turned
+      out to be a second wrong guess — a follow-up CI diagnostic step
+      showed the umbrella library has **no discoverable `.tbd` anywhere**
+      in the SDK, under any name; only its individual sub-libraries do.
+      `classify_dependency` now special-cases it as always-available by
+      construction instead (`ld64` requires every dynamic binary to link
+      it, confirmed independently by this project's own `-lSystem`
+      finding) — see `docs/dependency-resolution.md`. The CI step still
+      runs with `--allow-unavailable` until its own output confirms
+      `libSystem.B.dylib` now reports `available`.
 - [ ] Once a real (non-trivial) macOS binary is the target, run the above
       against it: `check-deps` will name which frameworks need a redirect
       (an iOS equivalent under a different path — `OpenGL` → `OpenGLES` is

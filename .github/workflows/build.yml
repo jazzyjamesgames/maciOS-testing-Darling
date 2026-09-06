@@ -46,29 +46,6 @@ jobs:
       - name: Build and patch the real macOS-binary test payload
         run: ./test-payload/build-and-patch.sh
 
-      - name: Diagnose real iOS SDK layout for libSystem (temporary -- see docs/dependency-resolution.md)
-        run: |
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "SDK: $SDK"
-          echo "--- files matching *libsystem* under \$SDK/usr/lib ---"
-          find "$SDK/usr/lib" -iname '*libsystem*' -print
-          F=$(find "$SDK/usr/lib" -iname '*libsystem*' -type f | head -1)
-          if [ -n "$F" ]; then
-            echo "--- first 60 lines of $F ---"
-            head -60 "$F"
-          else
-            echo "no file matching *libsystem* found anywhere under \$SDK/usr/lib"
-          fi
-        # Temporary, read-only, exploratory: the 2026-09-06 check-deps fix
-        # (classify_dependency scanning .tbd files for a declared
-        # install-name) still didn't find a match for
-        # /usr/lib/libSystem.B.dylib on a real run against a real SDK --
-        # meaning the assumed .tbd format/location was itself wrong, not
-        # just the original literal-path check. Rather than guess a second
-        # time, this dumps the real SDK's actual layout so the next fix is
-        # based on what's actually there. Remove once check-deps itself is
-        # confirmed correct and this has served its purpose.
-
       - name: Check the patched payload's dependencies against the real iOS SDK
         run: |
           python3 tools/macho_patch.py check-deps test-payload/PatchedMacOSPayload.dylib --auto-detect-sdk --allow-unavailable
@@ -79,18 +56,19 @@ jobs:
         # fix) so the tool itself is proven against a real SDK on every push,
         # not just this repo's own offline/synthetic tests.
         #
-        # --allow-unavailable is temporary, not a shrug: the first run of
-        # this step (2026-09-06) found a real gap in classify_dependency's
-        # logic -- /usr/lib/libSystem.B.dylib doesn't exist at that literal
-        # path in a real iPhoneOS26.5 SDK at all, despite obviously being
-        # available, because the SDK's .tbd stub for it can live somewhere
-        # else / under a different name than the install name it declares.
-        # classify_dependency now also searches every .tbd's declared
-        # install-name as a fallback (see tools/macho_patch.py), but that
-        # fix is unverified against a real SDK from this sandbox (no Xcode
-        # here) -- --allow-unavailable stays until this step's own output
-        # is read back once and confirms libSystem.B.dylib now reports
-        # "available", at which point remove it and let this gate for real.
+        # --allow-unavailable is temporary. A now-removed diagnostic step
+        # found the real reason libSystem.B.dylib wasn't classified as
+        # available (2026-09-06): the SDK genuinely has no discoverable
+        # .tbd for that umbrella library at all, under any name, anywhere
+        # under usr/lib -- only its individual sub-libraries
+        # (libsystem_kernel.dylib etc.) have their own stubs, nested under
+        # usr/lib/system/. classify_dependency now special-cases it as
+        # always-available by construction (see _ALWAYS_AVAILABLE_BASENAMES
+        # in tools/macho_patch.py) rather than searching for something that
+        # was never going to be found. --allow-unavailable stays until this
+        # step's own output is read back once and confirms
+        # libSystem.B.dylib now reports "available", at which point remove
+        # it and let this gate for real.
 
       - name: Generate Xcode project
         run: xcodegen generate

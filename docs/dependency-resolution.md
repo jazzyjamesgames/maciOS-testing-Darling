@@ -41,27 +41,38 @@ advance:
    only works on a real macOS toolchain). First checks whether
    `<sdk><path>` exists as a file -- true for many frameworks, whose
    `.tbd` (text-based stub) replaces the real binary at the exact same
-   on-disk path. **That alone is not reliable for plain dylibs, though --
-   confirmed directly against a real iPhoneOS26.5 SDK in CI (2026-09-06):
-   `/usr/lib/libSystem.B.dylib` does not exist at that literal path at
-   all**, despite libSystem obviously being available on iOS, because the
-   SDK's `.tbd` stub for it lives under a different filename
-   (`libSystem.tbd`) than the install name it declares. `ld` resolves a
-   dependency by whatever install name a `.tbd` *declares* inside itself,
-   not by the stub file's own path or name -- so when the direct path
-   check finds nothing, `classify_dependency` also scans every `.tbd`
-   under `<sdk>/usr/lib` and `<sdk>/System/Library/(Private)Frameworks`
-   for one that declares the dependency's exact install name
-   (`_sdk_install_name_index`), and only calls something unavailable if
-   neither check finds it. `.github/workflows/build.yml` runs this on
-   every push against `test-payload/PatchedMacOSPayload.dylib` (which
-   links `/usr/lib/libSystem.B.dylib` after the `-lSystem` fix -- see
+   on-disk path. If that finds nothing, `classify_dependency` also scans
+   every `.tbd` under `<sdk>/usr/lib` and
+   `<sdk>/System/Library/(Private)Frameworks` for one that *declares* the
+   dependency's exact install name (`ld` resolves by a `.tbd`'s declared
+   name, not by the stub file's own path -- confirmed necessary directly:
+   a real iPhoneOS26.5 SDK has no file at the literal path
+   `/usr/lib/libSystem.B.dylib`, because that dylib's own `.tbd` lives
+   under a different name).
+
+   **One further exception, found the same way and now hardcoded rather
+   than searched for:** the umbrella `libSystem.B.dylib` has no
+   discoverable `.tbd` *anywhere* in a real SDK, under any name -- a CI
+   diagnostic step confirmed only its individual sub-libraries
+   (`libsystem_kernel.dylib`, `libsystem_malloc.dylib`, etc.) have their
+   own stubs, nested under `usr/lib/system/`, not the umbrella name
+   itself. `_ALWAYS_AVAILABLE_BASENAMES` special-cases it as always
+   available before either SDK check runs, on the grounds that it isn't
+   actually a variable question in the first place: this project's own
+   tooling already established (`test-payload/build-and-patch.sh`) that
+   `ld64` requires every dynamic executable/dylib to link `libSystem`, on
+   any Apple platform, so it's guaranteed present by construction, unlike
+   a real framework dependency that may or may not be there.
+
+   `.github/workflows/build.yml` runs `check-deps` on every push against
+   `test-payload/PatchedMacOSPayload.dylib` (which links
+   `/usr/lib/libSystem.B.dylib` after the `-lSystem` fix -- see
    `test-payload/build-and-patch.sh`), currently with `--allow-unavailable`
-   as a temporary safety net: the `.tbd`-scanning fix above hasn't been
-   confirmed against a real SDK yet (this repo's own sandbox has no Xcode
-   to test it with) -- read that step's own CI output once it reports
-   `libSystem.B.dylib` as `available`, then remove the flag and let this
-   step gate the build for real.
+   as a temporary safety net while the fix above awaits its first
+   confirming run (this repo's own sandbox has no Xcode to test it with) --
+   read that step's own CI output once it reports `libSystem.B.dylib` as
+   `available`, then remove the flag and let this step gate the build for
+   real.
 2. **The built-in `KNOWN_IOS_AVAILABILITY` table** (used when no SDK path
    is available -- this repo's own Linux sandbox has no iOS SDK at all).
    Deliberately non-exhaustive and explicitly labeled a "best-effort

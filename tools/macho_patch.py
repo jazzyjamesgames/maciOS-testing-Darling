@@ -582,6 +582,22 @@ def _sdk_install_name_index(sdk_root):
     return index
 
 
+# Confirmed directly against a real iPhoneOS26.5 SDK (2026-09-06,
+# .github/workflows/build.yml's diagnostic step): there is no discoverable
+# .tbd anywhere under <sdk>/usr/lib for the umbrella libSystem.B.dylib at
+# all -- only its individual sub-libraries (libsystem_kernel.dylib,
+# libsystem_malloc.dylib, etc.) have their own stubs, nested under
+# <sdk>/usr/lib/system/. This isn't a gap in the .tbd-scanning logic below;
+# the umbrella library genuinely isn't independently represented in the
+# SDK. It's also not a meaningful question to classify in the first
+# place: this project's own tooling already established (test-payload/
+# build-and-patch.sh) that ld64 requires every dynamic executable/dylib to
+# link libSystem, on any Apple platform -- so it's guaranteed present by
+# construction, not something that varies per binary the way a real
+# framework dependency does.
+_ALWAYS_AVAILABLE_BASENAMES = {"libSystem.B.dylib"}
+
+
 def classify_dependency(path, ios_sdk_path=None):
     """Returns (status, detail): status is 'available', 'unavailable', or
     'unknown'. Verified directly against a real iOS SDK when ios_sdk_path
@@ -594,6 +610,9 @@ def classify_dependency(path, ios_sdk_path=None):
     KNOWN_IOS_AVAILABILITY table when no SDK path is given at all, which is
     what to trust only until a real SDK is available to check instead."""
     basename = path.rsplit("/", 1)[-1]
+    if basename in _ALWAYS_AVAILABLE_BASENAMES:
+        return ("available", "always present on any dynamically linked Apple binary, "
+                              "by construction -- not resolved via SDK lookup")
     if ios_sdk_path:
         candidate = os.path.join(ios_sdk_path, path.lstrip("/"))
         if os.path.exists(candidate):
