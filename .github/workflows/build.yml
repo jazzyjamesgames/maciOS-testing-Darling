@@ -48,7 +48,7 @@ jobs:
 
       - name: Check the patched payload's dependencies against the real iOS SDK
         run: |
-          python3 tools/macho_patch.py check-deps test-payload/PatchedMacOSPayload.dylib --auto-detect-sdk --allow-unavailable
+          python3 tools/macho_patch.py check-deps test-payload/PatchedMacOSPayload.dylib --auto-detect-sdk
         # This is the tool M3's dependency-resolution work (MILESTONES.md,
         # docs/dependency-resolution.md) will run against a real target once
         # one is picked -- exercised here against the payload this CI already
@@ -56,19 +56,12 @@ jobs:
         # fix) so the tool itself is proven against a real SDK on every push,
         # not just this repo's own offline/synthetic tests.
         #
-        # --allow-unavailable is temporary. A now-removed diagnostic step
-        # found the real reason libSystem.B.dylib wasn't classified as
-        # available (2026-09-06): the SDK genuinely has no discoverable
-        # .tbd for that umbrella library at all, under any name, anywhere
-        # under usr/lib -- only its individual sub-libraries
-        # (libsystem_kernel.dylib etc.) have their own stubs, nested under
-        # usr/lib/system/. classify_dependency now special-cases it as
-        # always-available by construction (see _ALWAYS_AVAILABLE_BASENAMES
-        # in tools/macho_patch.py) rather than searching for something that
-        # was never going to be found. --allow-unavailable stays until this
-        # step's own output is read back once and confirms
-        # libSystem.B.dylib now reports "available", at which point remove
-        # it and let this gate for real.
+        # No --allow-unavailable: confirmed 2026-09-06 (run 19) that this
+        # step correctly reports libSystem.B.dylib as "available" (the
+        # _ALWAYS_AVAILABLE_BASENAMES special case in tools/macho_patch.py,
+        # after two earlier guesses at the real SDK layout both turned out
+        # wrong -- see docs/dependency-resolution.md), so this now gates
+        # the build for real.
 
       - name: Generate Xcode project
         run: xcodegen generate

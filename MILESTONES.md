@@ -190,9 +190,10 @@ touching its source.
       `classify_dependency` now special-cases it as always-available by
       construction instead (`ld64` requires every dynamic binary to link
       it, confirmed independently by this project's own `-lSystem`
-      finding) — see `docs/dependency-resolution.md`. The CI step still
-      runs with `--allow-unavailable` until its own output confirms
-      `libSystem.B.dylib` now reports `available`.
+      finding) — see `docs/dependency-resolution.md`. **Confirmed
+      2026-09-06 (CI run 19): `libSystem.B.dylib` now reports
+      `available`** — `--allow-unavailable` removed, the step gates the
+      build for real.
 - [ ] Once a real (non-trivial) macOS binary is the target, run the above
       against it: `check-deps` will name which frameworks need a redirect
       (an iOS equivalent under a different path — `OpenGL` → `OpenGLES` is

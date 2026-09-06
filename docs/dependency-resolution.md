@@ -67,12 +67,11 @@ advance:
    `.github/workflows/build.yml` runs `check-deps` on every push against
    `test-payload/PatchedMacOSPayload.dylib` (which links
    `/usr/lib/libSystem.B.dylib` after the `-lSystem` fix -- see
-   `test-payload/build-and-patch.sh`), currently with `--allow-unavailable`
-   as a temporary safety net while the fix above awaits its first
-   confirming run (this repo's own sandbox has no Xcode to test it with) --
-   read that step's own CI output once it reports `libSystem.B.dylib` as
-   `available`, then remove the flag and let this step gate the build for
-   real.
+   `test-payload/build-and-patch.sh`). **Confirmed 2026-09-06 (CI run
+   19)**: `libSystem.B.dylib` now reports `available`, with the expected
+   detail ("always present on any dynamically linked Apple binary, by
+   construction -- not resolved via SDK lookup") -- the step no longer
+   needs `--allow-unavailable` and gates the build for real.
 2. **The built-in `KNOWN_IOS_AVAILABILITY` table** (used when no SDK path
    is available -- this repo's own Linux sandbox has no iOS SDK at all).
    Deliberately non-exhaustive and explicitly labeled a "best-effort
