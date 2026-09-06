@@ -73,44 +73,69 @@ The dylib needs one exported C function matching `int name(void)` -- this
 is the CLI's ported entry point (the same shape as `port/CLICore`'s
 `clicore_run`, adjusted to return an int status instead of a string).
 
+**The current on-device test doesn't use this pipeline yet.**
+`test-payload/TestPayload.c` is a real Xcode-built framework target
+(`project.yml`'s `TestPayload`, embedded in `MaciOSPortApp` alongside
+`ProcessHost`) exporting exactly one function, `maciOS_test_entry`,
+returning `42`. It exists to test `process-host/`'s mechanism in
+isolation -- does the extension trick really produce a separate process,
+does `dlopen`/`dlsym` really resolve something at
+`Frameworks/TestPayload.framework/TestPayload` -- before adding the
+separate variable of a *foreign*, macho_patch.py-patched binary's own
+dependencies (AUDIT.md section 5) into the same test.
+
 ## Invoking it from the host app
 
-This is ordinary `NSExtension` API, not anything private -- the same shape
-`ios18-probe`'s own `Probe/main.m` used for its own extension test:
+This uses `NSExtension` directly -- a **real but undocumented** Foundation
+class (no public header at all), the same one LiveContainer's own
+`FoundationPrivate.h` and `ios18-probe`'s `Probe/main.m` forward-declare
+rather than import. `port/MaciOSPortApp/ProcessHostTester.h`/`.m` is this
+project's version of that forward declaration, wired to a "Test
+ProcessHost" button in `ContentView.swift`. Two things worth knowing
+before reading it:
 
-```objc
-NSError *error = nil;
-NSExtension *ext = [NSExtension extensionWithIdentifier:@"dev.local.maciOS.PortApp.ProcessHost"
-                                                   error:&error];
-NSExtensionItem *item = [NSExtensionItem new];
-item.userInfo = @{@"dylibPath": dylibPath, @"entryPoint": @"mytool_main"};
-[ext beginExtensionRequestWithInputItems:@[item] completion:^(NSUUID *identifier) {
-    int pid = [ext pidForRequestIdentifier:identifier];
-    // the reply NSExtensionItem (with "exitCode" or "error" in its
-    // userInfo) arrives through the extension's own completion/result
-    // path once beginRequestWithExtensionContext: calls
-    // completeRequestReturningItems:
-}];
-```
+- **The identifier in `Info.plist` is not the identifier that's actually
+  registered on-device.** Confirmed directly, not theoretical: SideStore's
+  install-time resign inserted its own team-ID segment into the middle of
+  it (`dev.local.maciOS.PortApp.ProcessHost` in the source became
+  `dev.local.maciOS.PortApp.676TQUDKG7.ProcessHost` on install --
+  `installd`'s own error message is what surfaced this, while diagnosing
+  an unrelated `CFBundleDisplayName` rejection). `ProcessHostTester.m`
+  reads the real identifier back from the installed `.appex`'s own
+  `Info.plist` under `Bundle.main.builtInPlugInsURL` rather than
+  hardcoding the design-time string, for exactly this reason.
+- **This tests process-spawn, not the payload's exit code.** `main.m`'s
+  `ProcessHostHandler` replies via `completeRequestReturningItems:` with a
+  `pid`/`exitCode`/`error` payload, but whether that reply is actually
+  observable back on the caller's side through any proven mechanism is
+  still an open question -- neither this project's own testing nor the
+  prior art it draws on has confirmed it. `ProcessHostTester.m`
+  deliberately doesn't rely on it: it reports success only via
+  `pidForRequestIdentifier:` (a real, different PID) and failure via
+  `setRequestCancellationBlock:`, both confirmed working in `ios18-probe`'s
+  own on-device testing ("LAUNCHED as a real separate process... pid=%d").
+  That's a smaller, honestly-scoped claim -- "did a real separate process
+  come up at all" -- than "did the payload's exit code come back," and
+  it's the one to get answered first.
 
-## Known limitations (carried over from ios18-probe's findings)
+## Known limitations (carried over from ios18-probe's findings, or found here)
 
+- **The exit-code/error reply path is unverified**, per above -- treat
+  `main.m`'s reply payload as best-effort until something confirms the
+  caller can actually read it back.
 - **One call per process instance, for now.** Each extension request gets
   a fresh process; there's no persistent "keep it running and call it
   again" path implemented here yet.
-- **A crash is unobservable.** If the payload's `entry()` call crashes, the
-  process dies and the caller sees the extension request get cancelled --
-  there's no signal beyond that from this side. `ios18-probe`'s own probe
-  app hit this repeatedly; its workaround (writing progress to disk before
-  each risky call) is the pattern to reach for if a payload needs that
-  kind of visibility.
+- **A crash is unobservable** beyond `setRequestCancellationBlock:` firing.
+  If the payload's `entry()` call crashes, the process dies and that's
+  the only signal from this side. `ios18-probe`'s own probe app hit this
+  repeatedly; its workaround (writing progress to disk before each risky
+  call) is the pattern to reach for if a payload needs more visibility
+  than that.
 - **No argv.** App-extension launches don't carry a shell-style `argv`; a
   payload that needs arguments should read them from a file path or a
   second `userInfo` key, not expect `int main(int argc, char **argv)`
   semantics.
-- **Untested on-device.** Like the rest of this repo, this was written and
-  structurally reasoned about from a Linux sandbox with no Apple toolchain
-  -- see `AUDIT.md` section 3 for exactly what could and couldn't be
-  verified here. Wiring `process-host/` into an actual Xcode extension
-  target, bundling it, and confirming a payload actually runs is the next
-  on-device step, same as `docs/xcode-setup.md`'s M1.
+- **Bundle identifiers get rewritten on install.** See above -- never
+  hardcode an extension's design-time `CFBundleIdentifier` when invoking
+  it; read it back from the installed bundle.

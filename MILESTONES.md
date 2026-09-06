@@ -8,7 +8,7 @@ extension standing in for `posix_spawn` (section 3, `process-host/`). Every
 milestone below builds on one or both. Native ARM64 throughout — no VM, no
 CPU emulator, no instruction translation.
 
-## M1 — Trivial CLI, source-ported (in progress)
+## M1 — Trivial CLI, source-ported — ✅ DONE, confirmed on-device
 
 **Path A from `AUDIT.md` section 4: you have the source.**
 
@@ -26,13 +26,19 @@ payload, before spending any effort on a real tool's dependencies.
       `clicore_run()`, show the result." This is the smallest shell iOS
       will actually install and launch — there is no smaller unit than
       "one view."
-- [ ] **On your Mac**: create the Xcode project, drop these files in,
-      build, sign with your Apple ID, run on your iPhone 14 over USB.
-      Step-by-step in `docs/xcode-setup.md`. This step needs Xcode and
-      your physical device, so it's the one part of M1 you complete
-      yourself — I have no Mac or iPhone access from this sandbox.
+- [x] **On-device, confirmed 2026-09-06**: built via CI (`.github/workflows/build.yml`),
+      installed via SideStore on the user's iPhone 14 (iOS 26.1, not
+      jailbroken). In-app log, verbatim:
+      ```
+      [19:53:23.366] app launched
+      [19:53:23.368] clicore_run() -> hello from native arm64 maciOS (ported)
+      ```
+      Native ARM64 C code, compiled for `arm64-apple-ios`, executing inside
+      a normally-installed, normally-signed iOS app on real hardware — no
+      VM, no CPU emulator, no jailbreak. This is the answer the whole audit
+      was chasing.
 
-**Definition of done:** the app launches on your iPhone and displays the
+**Definition of done:** ✅ the app launches on the iPhone and displays the
 string produced by `clicore_run()`.
 
 ## M2 — An already-compiled binary, patched and run via `process-host/`
@@ -56,18 +62,33 @@ touching its source.
       (the `com.apple.ar.viewer` / `_MultipleInstances` / `_ProcessType`
       trick from LiveContainer) and the payload contract
       (`int name(void)`, invoked via `dlopen`/`dlsym`).
-- [ ] **On your Mac**: pick a real small, portable (no AppKit/Cocoa,
+- [x] `test-payload/TestPayload.c` + `project.yml`'s `TestPayload` target —
+      a real, Xcode-built native payload (one function, `maciOS_test_entry`,
+      returns `42`), embedded alongside `process-host/` in `MaciOSPortApp`.
+      Exists to test the extension mechanism itself first, decoupled from
+      whether some specific foreign binary's dependencies resolve on iOS.
+- [x] `port/MaciOSPortApp/ProcessHostTester.h`/`.m` + a "Test ProcessHost"
+      button in `ContentView.swift` — invokes `process-host/` for real via
+      the same undocumented `NSExtension` API `ios18-probe` proved works,
+      reading the extension's *installed* (SideStore-rewritten)
+      `CFBundleIdentifier` back rather than hardcoding it. Deliberately
+      scoped to just the process-spawn question (a real, different PID) —
+      see `docs/process-host.md` for why the exit-code reply path is
+      treated as unverified rather than assumed.
+- [ ] **On your device**: tap "Test ProcessHost" and report back the
+      logged result (`ProcessHost LAUNCHED, reported pid=...` or
+      `ProcessHost FAILED: ...`). This is the next real unknown — nothing
+      has confirmed the `com.apple.ar.viewer`/`_MultipleInstances` trick
+      actually produces a separate process on *this* device yet.
+- [ ] Once that's confirmed: pick a real small, portable (no AppKit/Cocoa,
       libSystem/Foundation/CoreFoundation-level dependencies only) macOS
       CLI binary — or reuse `fixtures/hello.s`'s pattern, adapted to
       export a named `int name(void)` entry point instead of calling
-      `exit()` directly, as the concrete first test subject. Patch it
-      (`patch --platform ios`, then `dylibify --no-resign`), add it to the
-      Xcode project as a "Copy Files" build phase input targeting
-      `Frameworks/` so Xcode signs it along with everything else when you
-      build, add `process-host/` as an extension target, run from Xcode,
-      and invoke it per `docs/process-host.md`. (No SideStore needed here
-      — that only matters if the payload were being fetched/patched after
-      the app is already installed, which this milestone doesn't do.)
+      `exit()` directly. Patch it (`patch --platform ios`, then
+      `dylibify --no-resign`), add it to the Xcode project as a "Copy
+      Files" build phase input targeting `Frameworks/` (same as
+      `TestPayload`), and point `ProcessHostTester`'s `dylibPath` at it
+      instead.
 - [ ] Expect to spend most of the effort on dependency resolution once a
       real tool is the target: any macOS-only framework the binary links
       against needs either a redirect to iOS's real equivalent (if one
@@ -81,8 +102,9 @@ touching its source.
       a real target names which dependencies actually matter.
 
 **Definition of done:** `process-host/` reports back a real PID (different
-from the host app's own) and the correct `exitCode` from the patched
-binary's entry point.
+from the host app's own). The exit-code/error reply path is a follow-up,
+not required for this milestone's core claim (process isolation without
+`posix_spawn`) to be considered proven.
 
 ## M3 — A real small CLI tool, either path
 

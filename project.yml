@@ -48,6 +48,26 @@ targets:
     dependencies:
       - target: ProcessHost
         embed: true
+      - target: TestPayload
+        embed: true
+
+  TestPayload:
+    # A real Xcode-built dylib (packaged as a framework, iOS's normal
+    # embeddable-dynamic-library shape) for process-host/ to dlopen at
+    # runtime -- see test-payload/TestPayload.c for why this is separate
+    # from the tools/macho_patch.py pipeline.
+    type: framework
+    platform: iOS
+    sources:
+      - path: test-payload
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.local.maciOS.TestPayload
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        DEFINES_MODULE: NO
+        SKIP_INSTALL: NO
 
   ProcessHost:
     type: app-extension

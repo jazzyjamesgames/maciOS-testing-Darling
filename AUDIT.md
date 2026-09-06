@@ -269,9 +269,16 @@ above.
 
 ## 6. Minimum milestones
 
-See `MILESTONES.md`. M1 is path A (source port) — smallest possible unit,
-buildable and installable only via Xcode on a Mac. M2 is path B (patch an
-existing compiled binary, run it via `process-host/`), the more general
-and more powerful of the two once path A is confirmed working end to end.
-Later milestones scale up to a real CLI tool, then (much further out,
-flagged as a large/likely-out-of-scope undertaking) a GUI port.
+See `MILESTONES.md`. **M1 is confirmed working on-device (2026-09-06)**:
+built via CI, installed via SideStore on the user's iPhone 14 (iOS 26.1,
+not jailbroken), and the in-app log shows `clicore_run()` executing and
+returning its string — native ARM64 C code, compiled for `arm64-apple-ios`,
+running inside a normally-installed app, no VM, no emulator, no jailbreak.
+That confirms the whole chain this audit reasoned about actually holds up
+on real hardware, not just in analysis.
+
+M2 is path B (patch an existing compiled binary, run it via
+`process-host/`) — the more general and more powerful of the two, and the
+current focus now that path A is confirmed. Later milestones scale up to
+a real CLI tool, then (much further out, flagged as a large/likely-out-of-
+scope undertaking) a GUI port.
