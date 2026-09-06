@@ -30,6 +30,7 @@ source vs. an already-compiled binary loaded by process-host/).
 import argparse
 import hashlib
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -526,20 +527,82 @@ def _detect_ios_sdk_path():
     return path or None
 
 
+_TBD_INSTALL_NAME_RE = re.compile(r"^\s*install-name:\s*(\S+)\s*$", re.MULTILINE)
+_sdk_install_name_index_cache = {}
+
+
+def _read_tbd_install_name(path):
+    """A .tbd (text-based stub) file replaces a real Mach-O at the exact
+    same on-disk path/filename inside an SDK -- but only for some
+    libraries. Confirmed directly (2026-09-06 CI run against a real
+    iPhoneOS26.5 SDK): /usr/lib/libSystem.B.dylib does not exist in the SDK
+    at all, under any name at that path, despite libSystem obviously being
+    available on iOS -- so a stub replacing a dylib is not reliably found
+    at the dependency's own runtime path, and can't be assumed to be one
+    even where a file of that name IS found. Detect a real .tbd by content
+    (its distinctive YAML-ish "---" header), not by extension or path."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return None
+    if not head.startswith(b"---"):
+        return None
+    text = head.decode("utf-8", "replace")
+    match = _TBD_INSTALL_NAME_RE.search(text)
+    return match.group(1).strip('"') if match else None
+
+
+def _iter_sdk_stub_candidates(sdk_root):
+    for subdir in ("usr/lib", "System/Library/Frameworks", "System/Library/PrivateFrameworks"):
+        base = os.path.join(sdk_root, subdir)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(base):
+            for fname in filenames:
+                yield os.path.join(dirpath, fname)
+
+
+def _sdk_install_name_index(sdk_root):
+    """Every install-name declared by any .tbd stub anywhere under
+    <sdk>/usr/lib or <sdk>/System/Library/(Private)Frameworks -- built once
+    per SDK root and cached. The point: ld resolves a dependency by whatever
+    install name a .tbd *declares*, not by where that .tbd file happens to
+    sit or what it's named, so this is what actually decides whether a
+    dependency is satisfiable, when a plain path-exists check (tried first,
+    since it's cheap and correct for many frameworks) comes back empty."""
+    if sdk_root in _sdk_install_name_index_cache:
+        return _sdk_install_name_index_cache[sdk_root]
+    index = set()
+    for candidate in _iter_sdk_stub_candidates(sdk_root):
+        name = _read_tbd_install_name(candidate)
+        if name:
+            index.add(name)
+    _sdk_install_name_index_cache[sdk_root] = index
+    return index
+
+
 def classify_dependency(path, ios_sdk_path=None):
     """Returns (status, detail): status is 'available', 'unavailable', or
-    'unknown'. Verified directly against a real iOS SDK's on-disk layout
-    when ios_sdk_path is given (the authoritative source -- SDKs mirror the
-    runtime's absolute framework/dylib paths under their own root, e.g.
-    <sdk>/System/Library/Frameworks/Foundation.framework/Foundation). Falls
-    back to the best-effort KNOWN_IOS_AVAILABILITY table otherwise, which is
+    'unknown'. Verified directly against a real iOS SDK when ios_sdk_path
+    is given (the authoritative source) -- first by a plain path-exists
+    check (correct for most frameworks, whose .tbd stub replaces the
+    binary at its exact runtime path), then, if that finds nothing, by
+    searching every .tbd stub in the SDK for one that *declares* this
+    install name (needed for at least some plain dylibs under /usr/lib --
+    see _read_tbd_install_name). Falls back to the best-effort
+    KNOWN_IOS_AVAILABILITY table when no SDK path is given at all, which is
     what to trust only until a real SDK is available to check instead."""
     basename = path.rsplit("/", 1)[-1]
     if ios_sdk_path:
         candidate = os.path.join(ios_sdk_path, path.lstrip("/"))
-        exists = os.path.exists(candidate)
-        return ("available" if exists else "unavailable",
-                "verified against %s" % ios_sdk_path)
+        if os.path.exists(candidate):
+            return ("available", "verified against %s (file present at this path)" % ios_sdk_path)
+        if path in _sdk_install_name_index(ios_sdk_path):
+            return ("available", "verified against %s (a .tbd stub elsewhere in the SDK "
+                                  "declares this install name)" % ios_sdk_path)
+        return ("unavailable", "verified against %s (no file at this path, and no .tbd "
+                                "stub in the SDK declares this install name)" % ios_sdk_path)
     known = KNOWN_IOS_AVAILABILITY.get(basename)
     if known is None:
         return ("unknown", "not in the built-in seed list -- check manually "

@@ -179,8 +179,17 @@ touching its source.
       dependency's path in place (same in-place-size constraint as
       `dylibify`'s install name). Not yet exercised against a real,
       non-trivial target — no specific tool has been picked for M3 yet —
-      but the tool itself is tested (19 unit tests, `tests/test_macho_patch.py`)
-      and CI-verified against a real iOS SDK.
+      but the tool itself is tested (22 unit tests, `tests/test_macho_patch.py`).
+      **First real CI run (2026-09-06) found a genuine gap and failed the
+      build**: `/usr/lib/libSystem.B.dylib` doesn't exist at that literal
+      path in a real iPhoneOS26.5 SDK at all — its `.tbd` stub lives under
+      a different filename than the install name it declares.
+      `classify_dependency` now also scans every `.tbd` in the SDK for a
+      matching declared install name, not just the literal path — see
+      `docs/dependency-resolution.md`. That fix is itself unverified
+      against a real SDK (no Xcode in this repo's own sandbox to test it
+      with), so the CI step runs with `--allow-unavailable` until its own
+      output confirms `libSystem.B.dylib` reports `available`.
 - [ ] Once a real (non-trivial) macOS binary is the target, run the above
       against it: `check-deps` will name which frameworks need a redirect
       (an iOS equivalent under a different path — `OpenGL` → `OpenGLES` is

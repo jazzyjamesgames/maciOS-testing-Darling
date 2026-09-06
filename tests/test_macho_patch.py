@@ -316,6 +316,37 @@ class TestDependencyResolution(unittest.TestCase):
             "/System/Library/Frameworks/NotThere.framework/NotThere", str(sdk_dir))
         self.assertEqual(status, "unavailable")
 
+    def test_classify_dependency_finds_install_name_declared_by_a_relocated_tbd(self):
+        # Reproduces the real gap found on a real iPhoneOS26.5 SDK in CI
+        # (2026-09-06): /usr/lib/libSystem.B.dylib doesn't exist at that
+        # literal path at all, because the SDK's .tbd stub for it lives
+        # under a different filename -- ld resolves by the .tbd's own
+        # declared install-name, not by where the stub file sits on disk.
+        sdk_dir = Path(self._get_tmp_dir())
+        lib_dir = sdk_dir / "usr/lib"
+        lib_dir.mkdir(parents=True)
+        (lib_dir / "libSystem.tbd").write_text(
+            '--- !tapi-tbd-v3\n'
+            'archs: [ arm64 ]\n'
+            'install-name: /usr/lib/libSystem.B.dylib\n'
+            'exports: []\n'
+        )
+        status, detail = mp.classify_dependency("/usr/lib/libSystem.B.dylib", str(sdk_dir))
+        self.assertEqual(status, "available")
+        self.assertIn("declares this install name", detail)
+
+    def test_classify_dependency_unavailable_when_no_file_and_no_tbd_matches(self):
+        sdk_dir = Path(self._get_tmp_dir())
+        (sdk_dir / "usr/lib").mkdir(parents=True)
+        status, _ = mp.classify_dependency("/usr/lib/libTotallyMadeUp.dylib", str(sdk_dir))
+        self.assertEqual(status, "unavailable")
+
+    def test_read_tbd_install_name_ignores_non_tbd_files(self):
+        tmp = Path(self._get_tmp_dir())
+        real_looking = tmp / "not_a_stub"
+        real_looking.write_bytes(b"\xfe\xed\xfa\xcf" + b"\x00" * 60)  # MH_MAGIC_64-ish junk
+        self.assertIsNone(mp._read_tbd_install_name(str(real_looking)))
+
     def _get_tmp_dir(self):
         import tempfile
         d = tempfile.mkdtemp()
