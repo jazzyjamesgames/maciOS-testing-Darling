@@ -174,13 +174,20 @@ same install-time resign from section 2 covers it — no separate signing
 story needed.
 
 **Confirmed on-device, 2026-09-06** (iPhone 14, iOS 26.1, not jailbroken):
-the host app (pid 1867) invoked `process-host/` and got back pid 1869 — a
-real, different process, produced without ever calling `posix_spawn`. See
-`MILESTONES.md`'s M2 for the exact log. This was the single largest
-remaining unknown in the whole audit: LiveContainer ships this trick and
-`ios18-probe` used it too, but nothing in *this* project had exercised it
-until this test, and there was no guarantee it would behave identically
-on a different device/iOS version. It does.
+the host app (pid 2547) invoked `process-host/` twice in the same run and
+got back two distinct real, separate processes — pid 2548 loading
+`PatchedMacOSPayload.dylib` (a binary compiled only for `arm64-apple-macos`,
+never recompiled for iOS, only platform-tag-patched and dylibified by
+`tools/macho_patch.py`), pid 2549 loading `TestPayload.framework` (the
+Xcode-compiled-for-iOS control). See `MILESTONES.md`'s M2 for the exact
+log. This was the single largest remaining unknown in the whole audit:
+LiveContainer ships this trick and `ios18-probe` used it too, but nothing
+in *this* project had exercised it until this test, and there was no
+guarantee it would behave identically on a different device/iOS version.
+It does — and it does so for genuinely foreign, never-iOS-targeted code,
+not just for code Xcode compiled for iOS in the first place. That's the
+complete, un-shortcut version of the claim this whole audit set out to
+test.
 
 This project's own version of that component is `process-host/` — see
 `docs/process-host.md` for the full mechanism and the payload contract.
@@ -288,12 +295,13 @@ running inside a normally-installed app, no VM, no emulator, no jailbreak.
 That confirms the whole chain this audit reasoned about actually holds up
 on real hardware, not just in analysis.
 
-**M2's core mechanism is confirmed working on-device too (2026-09-06)**:
-the `process-host/` extension trick got a real, separate PID on the same
-iPhone, without ever calling `posix_spawn` — see section 3. M2 is path B
-(patch an existing compiled binary, run it via `process-host/`) — the more
-general and more powerful of the two paths, and now that both paths' core
-mechanisms are confirmed on real hardware, the remaining work is scaling
+**M2 is fully confirmed working on-device too (2026-09-06)**, not just its
+mechanism: a binary compiled only for `arm64-apple-macos`, never
+recompiled for iOS, patched by `tools/macho_patch.py`, ran as a real
+separate process via `process-host/` — see section 3. M2 is path B (patch
+an existing compiled binary, run it via `process-host/`) — the more
+general and more powerful of the two paths, and with both now confirmed
+on real hardware for genuinely foreign code, the remaining work is scaling
 up to an actual real-world CLI tool (dependency resolution, section 5)
 rather than validating the underlying approach itself. Later milestones
 scale up to a real CLI tool, then (much further out, flagged as a

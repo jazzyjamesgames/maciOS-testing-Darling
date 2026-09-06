@@ -41,7 +41,7 @@ payload, before spending any effort on a real tool's dependencies.
 **Definition of done:** ✅ the app launches on the iPhone and displays the
 string produced by `clicore_run()`.
 
-## M2 — An already-compiled binary, patched and run via `process-host/` — ✅ core mechanism confirmed on-device
+## M2 — An already-compiled binary, patched and run via `process-host/` — ✅ DONE, confirmed on-device
 
 **Path B from `AUDIT.md` section 4: you don't need the source.**
 
@@ -91,14 +91,6 @@ touching its source.
       `posix_spawn`. This is the load-bearing claim behind all of M2 and
       every later milestone that needs real process isolation — confirmed,
       not just reasoned about from prior art.
-- [ ] Follow-up, not blocking: confirm the exit-code/error reply path
-      (`process-host/main.m`'s `completeRequestReturningItems:`) is
-      actually observable by the caller — still unverified per
-      `docs/process-host.md`. `TestPayload`'s `maciOS_test_entry` returns
-      `42`; if that value can be read back reliably, it's worth wiring in.
-      If not, whatever channel `ios18-probe` fell back to (Darwin
-      notifications, since App Group files didn't survive SideStore's
-      resign) is the next thing to try.
 - [x] `fixtures/macos_payload.c` + `test-payload/build-and-patch.sh` +
       `tools/macho_patch.py symbols` — the actual end-to-end pipeline
       (compile for macOS, never iOS → `patch --platform ios` → `dylibify`)
@@ -118,12 +110,27 @@ touching its source.
       path/entry-point pair, and `ContentView.swift` now has a second
       button, "Test ProcessHost (patched macOS binary)", alongside the
       already-confirmed native control.
-- [ ] **On your device**: tap "Test ProcessHost (patched macOS binary)"
-      and report back the log. This is the actual, un-shortcut M2 claim —
-      a binary that was genuinely never compiled for iOS, running via
-      `process-host/` after nothing but byte-level patching. Everything
-      before this point (M1, M2's native-payload test) used Xcode to
-      compile for iOS at some stage; this is the first test that doesn't.
+- [x] **On-device, confirmed 2026-09-06** (same session as M1, same iPhone
+      14, iOS 26.1, not jailbroken). In-app log, verbatim:
+      ```
+      [09:39:37.969] app launched
+      [09:39:37.971] clicore_run() -> hello from native arm64 maciOS (ported)
+      [09:39:40.497] Test ProcessHost (patched) tapped: my pid is 2547
+      [09:39:40.635] ProcessHost (patched) LAUNCHED, reported pid=2548
+      [09:39:43.129] Test ProcessHost (native) tapped: my pid is 2547
+      [09:39:43.191] ProcessHost (native) LAUNCHED, reported pid=2549
+      ```
+      **pid 2547 (host app) → pid 2548: a real, separate process, running
+      a binary that was compiled for `arm64-apple-macos` and never
+      recompiled for iOS at any point** — only platform-tag-patched and
+      dylibified by `tools/macho_patch.py`, exactly as `fixtures/macos_payload.c`
+      → `test-payload/build-and-patch.sh` → `process-host/` describes.
+      This is the actual, un-shortcut "maciOS" claim, not just the
+      mechanism in isolation: native ARM64 code that never targeted iOS,
+      running on a real non-jailbroken iPhone, no VM, no emulator. Both
+      process-host payloads (native control and patched macOS binary) got
+      distinct real PIDs in the same run, confirming the mechanism is
+      consistent across different loaded content, not a one-off.
 - [ ] Follow-up, not blocking: confirm the exit-code/error reply path
       (`process-host/main.m`'s `completeRequestReturningItems:`) is
       actually observable by the caller — still unverified per
@@ -146,13 +153,14 @@ touching its source.
       a real target names which dependencies actually matter.
 
 **Definition of done:** ✅ `process-host/` reports back a real PID (different
-from the host app's own). The exit-code/error reply path is a follow-up,
-not required for this milestone's core claim (process isolation without
-`posix_spawn`) to be considered proven.
+from the host app's own), for a binary that was patched, not recompiled.
+The exit-code/error reply path is a follow-up, not required for this
+milestone's core claim (process isolation without `posix_spawn`, for
+genuinely foreign macOS-compiled code) to be considered proven.
 
 ## M3 — A real small CLI tool, either path
 
-Once M1 and M2 are both confirmed working on-device, pick a specific real
+Both M1 and M2 are confirmed working on-device — pick a specific real
 tool and use whichever path fits (source available → path A; binary only →
 path B). Same "portable" constraint either way: no AppKit/Cocoa, no
 `fork`/`exec`/multiprocessing (the sandbox blocks spawning child processes
