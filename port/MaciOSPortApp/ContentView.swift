@@ -15,8 +15,8 @@ import SwiftUI
 //     produced by test-payload/build-and-patch.sh from a binary compiled
 //     for arm64-apple-macos and never recompiled for iOS -- run through
 //     tools/macho_patch.py's actual patch+dylibify pipeline instead. This
-//     is the real M2 claim ("you don't need the source"), not yet
-//     confirmed on-device as of this build.
+//     is the real M2 claim ("you don't need the source"), confirmed
+//     working on-device 2026-09-06 (pid 2547 -> 2548) -- see MILESTONES.md.
 // See ProcessHostTester.m for exactly what either test does and doesn't
 // verify.
 //
@@ -87,24 +87,13 @@ struct ContentView: View {
 
     private func testProcessHost(frameworksRelativePath: String, entryPoint: String, label: String) {
         log.log("Test ProcessHost (\(label)) tapped: my pid is \(ProcessInfo.processInfo.processIdentifier)")
-        // Positional, matching this C function's existing (CI-proven)
-        // unlabeled-parameter calling convention -- not trailing-closure
-        // sugar, since that requires a real argument label per parameter
-        // once there's more than one closure.
-        MaciOSTestProcessHost(frameworksRelativePath, entryPoint, { launched, pid, message in
+        MaciOSTestProcessHost(frameworksRelativePath, entryPoint) { launched, pid, message in
             if launched {
                 log.log("ProcessHost (\(label)) LAUNCHED, reported pid=\(pid)")
             } else {
                 log.log("ProcessHost (\(label)) FAILED: \(message ?? "(no message)")")
             }
-        }, { received, exitCode, error in
-            // This is the actual reply-channel experiment: see
-            // docs/process-host.md. If this line never appears, the
-            // auxiliary-connection hypothesis didn't pan out for this run.
-            if received {
-                log.log("ProcessHost (\(label)) REPLY via auxiliary connection: exitCode=\(exitCode) error=\(error ?? "nil")")
-            }
-        })
+        }
     }
 }
 

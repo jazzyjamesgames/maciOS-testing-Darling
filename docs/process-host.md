@@ -125,14 +125,14 @@ before reading it:
   reads the real identifier back from the installed `.appex`'s own
   `Info.plist` under `Bundle.main.builtInPlugInsURL` rather than
   hardcoding the design-time string, for exactly this reason.
-- **`completeRequestReturningItems:` is not the reply path that's actually
-  used.** `main.m`'s `ProcessHostHandler` still fills in a
-  `pid`/`exitCode`/`error` payload and calls it, kept for completeness, but
-  per the investigation below there is no accessor on the host side that
-  can read it back at all. The real reply path is the auxiliary-connection
-  mechanism described next.
+- **This tests process-spawn, not the payload's exit code.** `main.m`'s
+  `ProcessHostHandler` replies via `completeRequestReturningItems:` with a
+  `pid`/`exitCode`/`error` payload, but that reply is not observable from
+  the host side by any mechanism found so far -- see the investigation
+  below, including one real attempt at a workaround that was tried
+  on-device and ruled out, not just left unconfirmed.
 
-## The reply-channel investigation, and the mechanism it found
+## The reply-channel investigation (a real lead, tried, and ruled out)
 
 `ProcessHostTester.m`'s original forward declaration of `NSExtension` only
 had the four methods LiveContainer and `ios18-probe` actually used to
@@ -170,39 +170,48 @@ class, and line up with `initWithInputItems:listenerEndpoint:contextUUID:`
 made with a listener endpoint. That's the matching private slot on the
 extension side for whatever endpoint the host passed in.
 
-**This is now wired in as the actual reply channel, not just a
-hypothesis:**
+**This was wired in for real and tried on-device -- and ruled out, not
+just left unconfirmed.** The build: `ProcessHostTester.m` built an
+anonymous `NSXPCListener` and handed its endpoint into
+`beginExtensionRequestWithInputItems:listenerEndpoint:completion:`;
+`process-host/main.m` would have retrieved it via
+`context._auxiliaryListener` and called back through a shared protocol.
+None of that ever ran, though: **`beginExtensionRequestWithInputItems:
+listenerEndpoint:completion:` itself returned a nil request identifier for
+both payloads, confirmed on-device 2026-09-06** -- and fast (~120ms from
+tap to failure for both), the signature of a synchronous validation
+rejection, not a hung or crashed launch attempt. This extension point
+(`com.apple.ar.viewer`, declared with `FALSEPREDICATE`/`_MultipleInstances`/
+`_ProcessType:"App"` -- see "The mechanism" above) evidently does not
+accept an arbitrary caller-supplied listener endpoint through this call,
+whatever internal contract it actually expects there. The code for this
+attempt (the `NSXPCListener`/`NSXPCConnection` plumbing on both sides, the
+shared protocol header) was reverted rather than kept as dead, known-broken
+code -- **this section is the record of what was tried and why it doesn't
+work**, so a future session doesn't re-attempt the identical approach.
 
-- `port/MaciOSPortApp/ProcessHostTester.m` builds an anonymous
-  `NSXPCListener`, sets its delegate to a small
-  `MaciOSProcessHostReplyReceiver` (`<NSXPCListenerDelegate,
-  MaciOSProcessHostReply>`), and hands `listener.endpoint` into
-  `beginExtensionRequestWithInputItems:listenerEndpoint:completion:`. The
-  receiver is kept alive past the function's return via
-  `objc_setAssociatedObject` on the `NSExtension` instance (which already
-  outlives the call through its own captured blocks).
-- `process-host/main.m` retrieves `context._auxiliaryListener` (declared
-  via a private category, guarded with `respondsToSelector:`), opens an
-  `NSXPCConnection` to it, and calls
-  `processHostDidFinishWithPID:exitCode:error:` on the proxy -- a protocol
-  (`process-host/MaciOSProcessHostReply.h`) shared by both targets via a
-  single header referenced from both `project.yml` entries, not two
-  copies that could drift.
-- `ContentView.swift`'s two "Test ProcessHost" buttons now log a second
-  line, `... REPLY via auxiliary connection: exitCode=... error=...`, if
-  and when it arrives -- separately from and after the existing `LAUNCHED`
-  line. If that line never appears, the hypothesis didn't pan out and
-  whatever `ios18-probe` fell back to (Darwin notifications, since App
-  Group files didn't survive SideStore's resign) is next to try. **Not yet
-  confirmed on-device as of this writing** -- the mechanism is built from
-  real, dumped method names rather than guessed, but nothing has proven
-  the actual round trip completes yet.
+The two things that got ruled out, plainly:
+
+1. `completeRequestReturningItems:`'s payload -- no accessor exists on the
+   host side at all (per `NSExtension`'s dump).
+2. A caller-supplied `NSXPCListenerEndpoint` via `beginExtensionRequestWithInputItems:
+   listenerEndpoint:completion:` -- rejected outright by this extension
+   point before a process is even launched (confirmed on-device).
+
+Untried and worth trying next: `beginExtensionRequestWithOptions:inputItems:
+listenerEndpoint:completion:` (the sibling overload with an explicit
+`options:` dictionary -- maybe the plain 3-arg form is simply incomplete
+without one, though this is a guess, not a finding); and Darwin
+notifications, per `ios18-probe`'s own fallback (App Group files didn't
+survive SideStore's resign there either).
 
 ## Known limitations (carried over from ios18-probe's findings, or found here)
 
-- **The auxiliary-connection reply path is unconfirmed on-device.** Built
-  from real introspected method names, not guessed, but not yet proven to
-  actually deliver a message end to end -- see above.
+- **The exit-code/error reply path has no known working mechanism.** Both
+  `completeRequestReturningItems:` and the auxiliary-connection
+  listener-endpoint approach were tried; neither works, per above. Treat
+  `main.m`'s `completeRequestReturningItems:` payload as write-only until
+  something new is found.
 - **One call per process instance, for now.** Each extension request gets
   a fresh process; there's no persistent "keep it running and call it
   again" path implemented here yet.

@@ -139,23 +139,23 @@ touching its source.
       once it's worth wiring in. If the reply channel doesn't pan out,
       whatever `ios18-probe` fell back to (Darwin notifications, since
       App Group files didn't survive SideStore's resign) is next to try.
-      **In progress**: introspecting `NSExtension` and `NSExtensionContext`
-      (`port/MaciOSPortApp/NSExtensionIntrospection.h`/`.m`) found a real,
-      undocumented reply mechanism instead of the dead-end
-      `completeRequestReturningItems:` path — `NSExtension`'s dump
-      (confirmed on-device 2026-09-06) showed no accessor exposes that
-      payload at all, but surfaced
-      `beginExtensionRequestWithInputItems:listenerEndpoint:completion:`
-      (takes an `NSXPCListenerEndpoint`); `NSExtensionContext`'s dump
-      (also confirmed 2026-09-06) showed the matching private slot,
-      `_auxiliaryListener`/`_auxiliaryConnection`. This is now wired in for
-      real: `ProcessHostTester.m` builds an `NSXPCListener` and passes its
-      endpoint in; `process-host/main.m` retrieves it via
-      `_auxiliaryListener` and calls back over a shared protocol
-      (`process-host/MaciOSProcessHostReply.h`) — see
-      `docs/process-host.md`. **Not yet confirmed on-device**: built from
-      real introspected method names, not guessed, but the actual round
-      trip hasn't been proven to complete yet.
+      **Tried and ruled out, 2026-09-06** — introspecting `NSExtension`
+      and `NSExtensionContext` (`port/MaciOSPortApp/NSExtensionIntrospection.h`/`.m`)
+      found a real lead beyond the dead-end `completeRequestReturningItems:`
+      path (`NSExtension`'s dump showed no accessor exposes that payload
+      at all, but surfaced `beginExtensionRequestWithInputItems:
+      listenerEndpoint:completion:`; `NSExtensionContext`'s dump showed the
+      matching private slot, `_auxiliaryListener`/`_auxiliaryConnection`).
+      Wired in for real (an `NSXPCListener` passed as that endpoint,
+      retrieved via `_auxiliaryListener` on the extension side) and tested
+      on-device — **the listener-endpoint call itself was rejected
+      outright for both payloads** (a fast, clean nil request identifier,
+      not a hang or crash): this `com.apple.ar.viewer`-based extension
+      point doesn't accept a caller-supplied listener endpoint this way.
+      Reverted rather than kept as known-broken code; see
+      `docs/process-host.md`'s reply-channel section for the full record
+      and what's untried (an `options:`-dictionary variant of the same
+      call; Darwin notifications, per `ios18-probe`'s own fallback).
 - [ ] Once a real (non-trivial) macOS binary is the target, expect to
       spend most of the effort on dependency resolution: any macOS-only
       framework the binary links

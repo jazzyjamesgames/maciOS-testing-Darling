@@ -31,72 +31,38 @@
 //                    key instead, since app-extension launches don't carry
 //                    a shell-style argv anyway.
 //
-// Reply: two independent channels, since NSExtension's own dumped method
-// surface (see docs/process-host.md) confirmed the host side has no
-// accessor for the first one at all --
+// Reply: one NSExtensionItem back, userInfo carrying:
+//   "pid"         -- getpid() of this process, so the caller can confirm
+//                    it really is a separate PID
+//   "exitCode"    -- the payload function's return value, present only on
+//                    success
+//   "error"       -- a human-readable failure string, present only on
+//                    failure (dlopen/dlsym failure, or a crash is simply
+//                    the process dying -- there is no way to catch that
+//                    from here, same limitation noted throughout
+//                    ios18-probe's own probe app)
 //
-//   1. completeRequestReturningItems: with one NSExtensionItem, userInfo
-//      carrying "pid" (getpid(), so a caller that *can* observe this knows
-//      it's a separate PID), "exitCode" (present on success), "error"
-//      (present on failure). Kept for completeness/future callers, but as
-//      far as this project has found, this payload is unobservable from
-//      the host side of a com.apple.ar.viewer-style extension.
-//   2. replyViaAuxiliaryConnectionIfAvailable: an NSXPCConnection opened
-//      back through NSExtensionContext's private _auxiliaryListener, if
-//      the host passed one in -- the actual reply channel this project
-//      uses. A crash is still unobservable either way (there is no way to
-//      catch that from here, same limitation noted throughout
-//      ios18-probe's own probe app).
+// Whether this reply is actually observable from the host side is still
+// an open question -- per docs/process-host.md, NSExtension's own dumped
+// method surface has no accessor for it at all, and the one alternative
+// tried (an NSXPCConnection back through NSExtensionContext's private
+// _auxiliaryListener, fed by a listenerEndpoint the host would pass into
+// beginExtensionRequestWithInputItems:listenerEndpoint:completion:) was
+// tested on-device and found to be a dead end: that call is rejected
+// outright by this extension point before ever reaching this file, so
+// _auxiliaryListener is never populated to begin with. See
+// docs/process-host.md's reply-channel section for what's next
+// (Darwin notifications, per ios18-probe's own fallback).
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <unistd.h>
-#import "MaciOSProcessHostReply.h"
 
 typedef int (*ProcessHostEntry)(void);
-
-// Found by introspecting NSExtensionContext's real method surface (see
-// docs/process-host.md's "Investigating the reply-channel question"):
-// the private slot that receives whatever listenerEndpoint the host passed
-// into beginExtensionRequestWithInputItems:listenerEndpoint:completion:.
-// Not documented anywhere -- this is the actual hypothesis under test.
-@interface NSExtensionContext (MaciOSPrivateAuxiliaryConnection)
-- (nullable id)_auxiliaryListener;
-@end
 
 @interface ProcessHostHandler : NSObject <NSExtensionRequestHandling>
 @end
 
 @implementation ProcessHostHandler
-
-// Best-effort: reply over the private auxiliary-connection channel, if the
-// host actually passed a listenerEndpoint and _auxiliaryListener really
-// carries it. This is a second, independent path from
-// completeRequestReturningItems: below -- not a replacement for it, since
-// NSExtension's own dump confirmed nothing on the host side can read that
-// path's payload at all.
-- (void)replyViaAuxiliaryConnectionIfAvailable:(NSExtensionContext *)context
-                                          reply:(NSDictionary *)reply {
-  if (![context respondsToSelector:@selector(_auxiliaryListener)]) {
-    return;
-  }
-  id endpoint = [context _auxiliaryListener];
-  if (!endpoint) {
-    return;
-  }
-  NSXPCConnection *replyConnection = [[NSXPCConnection alloc] initWithListenerEndpoint:endpoint];
-  replyConnection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(MaciOSProcessHostReply)];
-  [replyConnection resume];
-  id<MaciOSProcessHostReply> proxy = [replyConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) {
-    NSLog(@"process-host: auxiliary connection proxy error: %@", proxyError);
-  }];
-  int exitCode = [reply[@"exitCode"] intValue];
-  NSString *error = reply[@"error"];
-  [proxy processHostDidFinishWithPID:getpid() exitCode:exitCode error:error];
-  // No synchronous "wait for delivery" API on an XPC proxy call -- give the
-  // message a moment to actually flush across before this process exits.
-  [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
-  [replyConnection invalidate];
-}
 
 - (void)beginRequestWithExtensionContext:(NSExtensionContext *)context {
   NSDictionary *request = [context.inputItems.firstObject userInfo];
@@ -107,7 +73,6 @@ typedef int (*ProcessHostEntry)(void);
   reply[@"pid"] = @(getpid());
 
   void (^finish)(void) = ^{
-    [self replyViaAuxiliaryConnectionIfAvailable:context reply:reply];
     NSExtensionItem *replyItem = [NSExtensionItem new];
     replyItem.userInfo = reply;
     [context completeRequestReturningItems:@[ replyItem ] completionHandler:nil];

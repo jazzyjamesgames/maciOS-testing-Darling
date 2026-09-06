@@ -6,17 +6,15 @@ NS_ASSUME_NONNULL_BEGIN
 // whether it got a genuinely separate OS process. See ProcessHostTester.m
 // for why this is scoped to exactly that question -- pid/cancellation
 // only, not the exitCode reply path -- and docs/process-host.md for the
-// full mechanism.
+// full mechanism, including why the exitCode reply is not attempted here:
+// the one mechanism tried (an NSXPCListenerEndpoint passed via
+// beginExtensionRequestWithInputItems:listenerEndpoint:completion:) was
+// tested on-device and rejected outright by this extension point (a fast,
+// clean nil identifier for both payloads, not a hang or a crash) -- a
+// falsified hypothesis, not merely an unconfirmed one. Reverted back to
+// the plain, confirmed-reliable completion: form rather than carry code
+// for a mechanism known not to work.
 typedef void (^MaciOSProcessHostResult)(BOOL launched, int pid, NSString * _Nullable message);
-
-// Fires later than completion above, if at all -- separately, over the
-// private NSExtensionContext "auxiliary connection" reply channel found by
-// introspecting NSExtension/NSExtensionContext's real method surfaces (see
-// docs/process-host.md's "Investigating the reply-channel question").
-// received==NO means process-host/main.m either never attempted the reply
-// (older build) or the channel didn't work as hypothesized -- this is the
-// actual open question being tested, not assumed to work.
-typedef void (^MaciOSProcessHostExitCode)(BOOL received, int exitCode, NSString * _Nullable error);
 
 // frameworksRelativePath is resolved against Bundle.main.privateFrameworksURL,
 // e.g. "TestPayload.framework/TestPayload" (Xcode-compiled control) or
@@ -24,7 +22,6 @@ typedef void (^MaciOSProcessHostExitCode)(BOOL received, int exitCode, NSString 
 // see test-payload/build-and-patch.sh).
 void MaciOSTestProcessHost(NSString *frameworksRelativePath,
                            NSString *entryPoint,
-                           MaciOSProcessHostResult completion,
-                           MaciOSProcessHostExitCode exitCodeCompletion);
+                           MaciOSProcessHostResult completion);
 
 NS_ASSUME_NONNULL_END

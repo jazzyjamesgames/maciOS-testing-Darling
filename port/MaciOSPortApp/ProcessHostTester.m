@@ -14,71 +14,36 @@
 // binary run through tools/macho_patch.py's actual patch+dylibify
 // pipeline -- proves the thing M2 is actually about).
 #import "ProcessHostTester.h"
-#import "../../process-host/MaciOSProcessHostReply.h"
-#import <objc/runtime.h>
 
 @interface NSExtension : NSObject
 + (instancetype)extensionWithIdentifier:(NSString *)identifier error:(NSError **)error;
 - (void)beginExtensionRequestWithInputItems:(NSArray *)items completion:(void (^)(NSUUID *))callback;
-// Found by introspecting NSExtension's real method surface (see
-// docs/process-host.md) -- the listenerEndpoint variant that gets this
-// experiment its reply channel. Not used by ios18-probe/LiveContainer,
-// which only ever needed the plain completion: form above.
-- (void)beginExtensionRequestWithInputItems:(NSArray *)items
-                            listenerEndpoint:(id)listenerEndpoint
-                                  completion:(void (^)(NSUUID *))callback;
 - (int)pidForRequestIdentifier:(NSUUID *)identifier;
 - (void)setRequestCancellationBlock:(void (^)(NSUUID *uuid, NSError *error))callback;
 @end
 
-// The host-side end of the auxiliary-connection reply channel: accepts the
-// one incoming NSXPCConnection process-host/main.m opens back using the
-// listenerEndpoint we hand into beginExtensionRequestWithInputItems:
-// listenerEndpoint:completion:, and forwards whatever it reports to
-// exitCodeCompletion. Kept alive past MaciOSTestProcessHost's return via
-// objc_setAssociatedObject on the NSExtension instance below -- it has to
-// be, since the whole point is this fires *after* this function returns.
-@interface MaciOSProcessHostReplyReceiver : NSObject <NSXPCListenerDelegate, MaciOSProcessHostReply>
-@property(nonatomic, copy) MaciOSProcessHostExitCode completion;
-@property(nonatomic, strong) NSXPCListener *listener;
-@end
-
-@implementation MaciOSProcessHostReplyReceiver
-
-- (BOOL)listener:(NSXPCListener *)listener shouldAcceptNewConnection:(NSXPCConnection *)newConnection {
-  newConnection.exportedInterface = [NSXPCInterface interfaceWithProtocol:@protocol(MaciOSProcessHostReply)];
-  newConnection.exportedObject = self;
-  [newConnection resume];
-  return YES;
-}
-
-- (void)processHostDidFinishWithPID:(pid_t)pid exitCode:(int)exitCode error:(NSString *)error {
-  if (self.completion) {
-    self.completion(YES, exitCode, error);
-  }
-}
-
-@end
-
-// completion fires on launch, using the two signals ios18-probe already
-// confirmed work (pidForRequestIdentifier:, the cancellation block for
-// failure) -- the load-bearing claim behind the whole approach, confirmed
-// on-device already (see MILESTONES.md).
-//
-// exitCodeCompletion is the actual experiment: an NSXPCListener built here,
-// its endpoint handed into beginExtensionRequestWithInputItems:
-// listenerEndpoint:completion:, on the theory (from introspecting
-// NSExtension/NSExtensionContext's real method surfaces -- see
-// docs/process-host.md) that process-host/main.m can retrieve that same
-// endpoint via NSExtensionContext's private _auxiliaryListener and connect
-// back through it directly, bypassing completeRequestReturningItems:
-// entirely (which NSExtension's dump confirmed has no host-side accessor
-// at all). If the hypothesis is wrong, exitCodeCompletion simply never
-// fires -- that's itself the answer, not a crash or a hang.
+// Scoped deliberately narrow: this answers "did process-host/'s
+// com.apple.ar.viewer extension trick get a genuinely separate real OS
+// process at all" -- the load-bearing claim behind the whole approach --
+// using only the two signals ios18-probe already confirmed work
+// (pidForRequestIdentifier:, the cancellation block for failure). It does
+// NOT attempt to read back process-host/main.m's exitCode/error reply
+// payload. Two things were tried for that and both are dead ends, per
+// on-device testing and docs/process-host.md:
+//   - completeRequestReturningItems: itself -- NSExtension's own dumped
+//     method surface has no accessor for it at all on the host side.
+//   - Passing an NSXPCListenerEndpoint via
+//     beginExtensionRequestWithInputItems:listenerEndpoint:completion:,
+//     retrieved on the extension side via NSExtensionContext's private
+//     _auxiliaryListener -- confirmed on-device to be rejected outright
+//     by this extension point (a fast, clean nil identifier for both
+//     payloads, not a hang or a crash: the framework validates and
+//     refuses the request before ever launching anything).
+// Better to ship a smaller, honestly-scoped test than a bigger one built
+// on a mechanism now known not to work for this extension point.
 void MaciOSTestProcessHost(NSString *frameworksRelativePath,
                            NSString *entryPoint,
-                           MaciOSProcessHostResult completion,
-                           MaciOSProcessHostExitCode exitCodeCompletion) {
+                           MaciOSProcessHostResult completion) {
   NSURL *plugInsURL = [[NSBundle mainBundle] builtInPlugInsURL];
   NSArray<NSURL *> *contents = [[NSFileManager defaultManager]
       contentsOfDirectoryAtURL:plugInsURL
@@ -136,23 +101,8 @@ void MaciOSTestProcessHost(NSString *frameworksRelativePath,
                                                   cancelError]);
   }];
 
-  MaciOSProcessHostReplyReceiver *receiver = [MaciOSProcessHostReplyReceiver new];
-  receiver.completion = exitCodeCompletion;
-  NSXPCListener *listener = [NSXPCListener anonymousListener];
-  listener.delegate = receiver;
-  receiver.listener = listener;
-  [listener resume];
-
-  // ext already outlives this function's return via the retain cycle its
-  // own captured completion/cancellation blocks create (a pre-existing
-  // pattern, not new here) -- piggyback the receiver on that same
-  // lifetime rather than inventing a second one.
-  static const void *kReplyReceiverKey = &kReplyReceiverKey;
-  objc_setAssociatedObject(ext, kReplyReceiverKey, receiver, OBJC_ASSOCIATION_RETAIN);
-
   [ext beginExtensionRequestWithInputItems:@[ item ]
-                          listenerEndpoint:listener.endpoint
-                                completion:^(NSUUID *requestIdentifier) {
+                                 completion:^(NSUUID *requestIdentifier) {
     if (!requestIdentifier) {
       completion(NO, 0, @"beginExtensionRequestWithInputItems: returned a nil identifier");
       return;
