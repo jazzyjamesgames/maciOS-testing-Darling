@@ -16,6 +16,14 @@
 	<string>dev.local.maciOS.PortApp.ProcessHost</string>
 	<key>CFBundleName</key>
 	<string>ProcessHost</string>
+	<!--
+	installd requires this on every embedded appex ("does not have a
+	CFBundleDisplayName key with a non-zero length string value in its
+	Info.plist"), caught on a real device install -- CI's simulator build
+	doesn't enforce this, so it slipped through the compile check.
+	-->
+	<key>CFBundleDisplayName</key>
+	<string>ProcessHost</string>
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
