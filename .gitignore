@@ -3,3 +3,5 @@ __pycache__/
 fixtures/hello_macos_arm64
 fixtures/macos_payload_macos_arm64
 test-payload/PatchedMacOSPayload.dylib
+loader/target
+loader/macho_loader

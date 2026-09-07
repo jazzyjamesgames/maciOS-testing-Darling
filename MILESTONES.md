@@ -274,6 +274,66 @@ multitasking) is the closest known prior art for compositing a *separately
 processed* GUI surface into a host window, if that's ever worth revisiting —
 not planned in the abstract here.
 
+## Custom loader track — Milestone 1 (separate from M1-M4 above)
+
+A different question from M1-M3's own path A/B: not "can the OS's normal
+load path (Xcode/dyld, or the extension-launch trick) run this," but "can
+*our own code*, not dyld, be the thing that maps and executes a Mach-O at
+all" — groundwork for eventually intercepting/redirecting syscalls at
+load time, distinct from `process-host/`'s approach (which runs unmodified
+code as-is via the OS's own extension-launch mechanism, no custom loading
+involved). See `docs/custom-loader.md` for the full report and
+`docs/syscall-table-diff.md` for the syscall ABI groundwork.
+
+- [x] Target binary: reused `fixtures/hello.s` (already proven by M1/M2's
+      own tests) rather than a new near-duplicate — no libSystem, direct
+      `svc #0x80` syscalls only. `loader/build_target.sh` builds it (needs
+      `-lSystem` on real `ld64`, same finding as
+      `test-payload/build-and-patch.sh`; doesn't affect the hand-written
+      instruction bytes since nothing in `hello.s` references an external
+      symbol).
+- [x] Structure fully documented: `loader/dump_structure.py` (otool
+      `-l`/`-h` equivalent, reusing `tools/macho_patch.py`) dumps every
+      load command, segment/section, the `LC_MAIN` entry point, and a
+      static `svc`-instruction scan. Confirmed the `svc #0x80` byte
+      encoding (`0xd4001001`) by hand before trusting the tool. Tested in
+      this sandbox against a real compiled binary
+      (`tests/test_loader_dump_structure.py`, 3 tests).
+- [x] `loader/macho_loader.c` — a from-scratch Mach-O parser/loader that
+      reads the file, maps `__TEXT` into freshly-reserved memory (handling
+      the target's PIE-ness via its own reserve-then-slide, not `MAP_FIXED`
+      at the literal preferred address), resolves the `LC_MAIN` entry
+      point, statically scans for `svc` instructions before ever jumping,
+      calls `sys_icache_invalidate` (required for ARM64 self-written-code
+      correctness, not optional), and then actually jumps to the entry
+      point — without touching dyld or macOS's normal loader path at all.
+- [x] `docs/syscall-table-diff.md`: for `exit`/`write`, there is **no ABI
+      difference** between macOS arm64 and iOS arm64 at all — same trap
+      immediate, same syscall number, same registers — because both share
+      the same kernel (XNU) and syscall table source. This is also, this
+      doc argues, *why* M1/M2 succeed with just a platform-tag patch: the
+      real per-platform differences (e.g. `posix_spawn` → `EPERM`) are
+      enforced by sandbox/MAC-framework *policy* layered on top of an
+      identical syscall table, not by the syscall table itself differing.
+- [x] CI-testable (`.github/workflows/build.yml`): builds the target and
+      the loader on the real macOS runner, runs
+      `./loader/macho_loader loader/target`, and asserts the target's own
+      `write` syscall's output actually appears — proof the parsing +
+      mapping + entry-point resolution is correct, not just that
+      everything compiled. **Not yet confirmed** (this session's first
+      push of this track); see the next CI run.
+- [ ] **Explicitly not yet done, flagged as on-device follow-up**: this
+      entire milestone runs as a normal macOS command-line tool on the CI
+      runner. Nothing here has been tried on iOS, where `mmap`/`mprotect`
+      with `PROT_EXEC` inside an app sandbox may face restrictions this
+      milestone hasn't measured (this loader's own W^X design never holds
+      `PROT_WRITE` and `PROT_EXEC` on the same page simultaneously, which
+      may or may not be sufficient — unconfirmed). Also not done: actually
+      intercepting/redirecting the located `svc` sites at runtime (this
+      milestone only locates them statically before jumping) — a future
+      milestone's concern, once the on-device mmap/mprotect question is
+      answered.
+
 ## Explicitly not planned
 
 - Any approach requiring jailbreak (AMFI bypass without a real signing

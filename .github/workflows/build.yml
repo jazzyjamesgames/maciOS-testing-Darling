@@ -43,6 +43,30 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Build and run the custom Mach-O loader (not dyld) -- Milestone 1
+        run: |
+          ./loader/build_target.sh
+          ./loader/build_loader.sh
+          OUTPUT="$(./loader/macho_loader loader/target)"
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "hello from native arm64 maciOS" || {
+            echo "::error::loader did not produce the target binary's expected output"
+            exit 1
+          }
+        # docs/custom-loader.md: proves a from-scratch parser can map
+        # fixtures/hello.s's __TEXT segment and jump to its real entry
+        # point without dyld or macOS's normal exec() path at all. The
+        # correctness check IS this exact behavior: if macho_loader.c's
+        # parsing/mapping/entry-point resolution is right, jumping to the
+        # entry point hands control to the target's own real write/exit
+        # syscalls, which print this string on the loader process's real
+        # stdout and then end the process with status 0 (grep on stdout
+        # here; a nonzero exit from this whole step separately catches a
+        # wrong exit code, since a failing `macho_loader` inside the
+        # `OUTPUT="$(...)"` assignment still trips this step's default
+        # errexit). Not yet run on iOS -- see docs/custom-loader.md's
+        # "Known limitations".
+
       - name: Build and patch the real macOS-binary test payload
         run: ./test-payload/build-and-patch.sh
 
